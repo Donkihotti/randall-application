@@ -5,22 +5,188 @@
   --foreground: #171717;
 }
 
+@layer components {
+  /*=====INPUTS======*/
+  .input-default {
+    @apply appearance-none focus:outline-none focus:ring-0 focus:shadow-none bg-none border-0;
+  }
+  
+  /*=====TEXT AREA=====*/
+  .textarea-default {
+    @apply appearance-none outline-none resize-none border border-light bg-transparent shadow-none p-2 m-0;
+  }
+  .box-link {
+    @apply px-3 py-1 text-small border rounded-xs border-black w-fit;
+  }
+
+  .box-link-s {
+    @apply px-3 py-0.5 text-small border rounded-xs border-black w-fit;
+  }
+
+  .box-link-filled-white {
+    @apply px-5 py-1 text-small bg-white rounded-xs text-black w-fit;
+  }
+  /*======BOXES USED IN UI===========*/
+  .box-bg-normal { 
+    @apply rounded-md border-light bg-normal border 
+  }
+  .box-bg-normal-plus { 
+    @apply rounded-md border-light bg-normal-plus border 
+  }
+  .box-bg-dark { 
+    @apply rounded-md border-light bg-normal-dark border 
+  }
+  /*======TEXT========*/
+  .text-app-nav { 
+    @apply text-lg md:text-xl text-white font-medium hover:cursor-pointer
+  }
+  /*======BUTTONS======*/
+  .button-tool {
+    @apply rounded-full bg-button pr-4 pl-3 py-0.5 text-medium border-border-main border hover:cursor-pointer flex flex-row items-center gap-x-2 hover:border-border-main-hover transition-colors duration-75
+  }
+  .button-icon { 
+    @apply bg-main border-border-main border p-1 rounded-xs hover:cursor-pointer opacity-70 hover:opacity-100 transition-all duration-100
+   }
+}
+
+/* Autofill overrides for Chrome / WebKit */
+.waitlist-input:-webkit-autofill,
+.waitlist-input:-webkit-autofill:hover,
+.waitlist-input:-webkit-autofill:focus,
+.waitlist-input:-webkit-autofill:active {
+  /* text color */
+  -webkit-text-fill-color: #ffffff !important;
+  caret-color: #11182700 !important;
+  /* optionally reduce autofill transition jump */
+  transition: background-color 5000s ease-in-out 0s;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+
+  /*=====FONTS=====*/
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-inter: var(--font-inter);
+  --font-instrument: var(--font-instrument); 
+
+  /*=====COLORS======*/
+
+  --color-button: var(--gray-6);
+  --color-menu: var(--menu);
+  --color-canvas: var(--gray-1);
+
+  --color-button-create: var(--gray-5);
+  --color-main-white: var(--gray-5);
+  --color-text-secondary: var(--gray-9); 
+  --color-text-white-secondary: var(--gray-11); 
+
+  --color-select-dark: var(--gray-10); 
+
+  --color-main: var(--gray-3);
+  --color-border-main: var(--gray-4);
+  --color-border-main-hover: var(--gray-8);
+  --color-secondary: var(--gray-6);
+
+  --color-normal: var(--normal);
+  --color-normal-plus: var(--normal-plus);
+  --color-normal-dark: var(--dark-gray); 
+  --color-light: var(--light-gray);
+  --color-lighter: var(--light-gray-plus);
+  --color-bg: var(--gray-2);
+  --color-bg-light: var(--gray-default-light);
+  
+
+  --color-side-menu: var(--menu-gray);
+  --color-default-orange: var(--default-orange);
+  --color-orange-focus: var(--default-orange-hover);
+
+  --color-landing-card: var(--light-gray-plus);
+  --color-gray-alt: var(--light-gray-alt);
+
+/*=====TEXT SIZE======*/
+
+  --text-header: var(--header);
+  --text-header-2: var(--header-2);
+  --text-medium: var(--text-medium);
+  --text-small: var(--sidemenu-text);
+  --text-supersmall: var(--text-smallest);
+  --text-paragraph: var(--text-medium);
+
+/*=====PADDING======*/
+
+  --padding-page: var(--padding-page);
+  --padding-small: var(--padding-small); 
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
+    --background: #121212;
     --foreground: #ededed;
+    --offgray: #242424; 
+
+    --menu: #000001;
+    --canvas: #100F10;
+    --normal: #383838;
+
+    --normal-plus: #2B2B2B; 
+    --gray-default: #171717;
+    --gray-default-light: #232323;
+    --dark-gray: #242424;
+    --light-gray: #484848; 
+    --light-gray-plus: #828282;
+    --menu-gray: #2F2F2F; 
+
+    --default-orange: #FD5E32;
+    --default-orange-hover: #ff8665;
+
+    --light-gray-plus: #F1F1F1;
+    --light-gray-alt: #9B9B9B;
+
+    --gray-1: #212121;
+    --gray-2: #121212;
+    --gray-3: #1C1C1C;
+    --gray-4: #2F2F2F;
+    --gray-5: #D9D9D9;
+    --gray-6: #272727;
+    --gray-7: #343434;
+    --gray-8: #525252;
+    --gray-9: #595959;
+    --gray-10: #141414; 
+    --gray-11: #ABABAB; 
+
+    --sidemenu-text: 14px; 
+    --header: 64px;
+    --header-2: 40px;
+    --text-normal: 24px; 
+    --text-smallest: 12px; 
+    --text-medium: 14px; 
+
+    --padding-page: 24px; 
+    --padding-small: 12px; 
+    --rounded-mid: 6px; 
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: Helvetica, Arial, sans-serif;
 }
+
+/*=====TOAST=======*/
+
+.my-toast {
+  background: #0b1220;
+  color: white;
+  padding: 10px 14px;
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(2,6,23,0.6);
+  font-size: 14px;
+}
+
+/* variations */
+.my-toast-success { background: #16a34a; color: white; }
+.my-toast-error { background: #dc2626; color: white; }
