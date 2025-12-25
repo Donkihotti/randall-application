@@ -62,50 +62,14 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
         <div style={{ width: 6, height: 6, borderRadius: 3, background: "#9ca3af" }} />
       </div>
 
-      {/* header */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
-          padding: "6px 12px",
-          borderBottom: "1px solid rgba(0,0,0,0.06)",
-          background: "rgba(0,0,0,0.02)",
-          fontSize: 12,
-        }}
-      >
-        <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {model ?? "model"}
-        </div>
-
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove?.(node.id);
-            }}
-            title="Remove node"
-            style={{
-              background: "transparent",
-              border: "none",
-              padding: "2px 6px",
-              cursor: "pointer",
-              fontSize: 12,
-            }}
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-
       {/* image area */}
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "#f6f7f9" }}>
         {image ? (
           <img
             src={image}
             alt={prompt ?? "generated"}
-            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "cover", display: "block" }}
+            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "cover",  display: "block" }}
+     
             draggable={false}
           />
         ) : (

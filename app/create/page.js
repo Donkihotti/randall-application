@@ -14,6 +14,7 @@ import EditScreen from "./components/edit/EditScreen";
 export default function Page() {
   // ---- Core UI state ----
   const [prompt, setPrompt] = useState("");
+  const latestGenerationPromptRef = useRef('');
   const [generating, setGenerating] = useState(false);
   const [predictionId, setPredictionId] = useState(null);
   const [prediction, setPrediction] = useState(null);
@@ -399,7 +400,7 @@ export default function Page() {
               if (targetId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
                 try {
                   nodeCanvasRef.current.updateNode(targetId, {
-                    data: { image: last, status: "done", prompt, model: panelValues.model?.selected },
+                    data: { image: last, status: "done", prompt: latestGenerationPromptRef.current, model: panelValues.model?.selected },
                   });
                   const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetId) ?? null;
                   if (updated) setSelectedNode(updated);
@@ -412,13 +413,9 @@ export default function Page() {
                   // create new node for the generated image
                   const newNodeId = nodeCanvasRef.current.addImageNode({
                     image: last,
-                    prompt,
+                    prompt: latestGenerationPromptRef.current,
                     model: panelValues.model?.selected,
-                    // optional: position: set position relative to selectedNode, e.g. to the right
-                    position: {
-                      x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, // place to the right of selected
-                      y: (selectedNode.y ?? 0)
-                    },
+                    position: { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) },
                     width: 260,
                     height: 180,
                   });
@@ -476,9 +473,14 @@ export default function Page() {
     setError(null);
     setImages([]);
     setPrediction(null);
-
+  
+    // capture the prompt text immediately so we can clear the textarea for UX
+    const currentPrompt = prompt ?? "";
+    latestGenerationPromptRef.current = currentPrompt; // used by poller and finalization
+    setPrompt(""); // clear the prompt box for the user
+  
     setGenerating(true);
-
+  
     // Decide target node: prefer selected node if not in 'edit' mode
     // If there's no selection, prefer a placeholder node to replace (first node without an image)
     let targetNodeId = null;
@@ -488,14 +490,14 @@ export default function Page() {
       // look for placeholder
       targetNodeId = findPlaceholderNodeId();
     }
-
+  
     if (targetNodeId && nodeCanvasRef.current?.updateNode) {
       try {
         // lock target for this generation (so later we update it)
         currentTargetRef.current = targetNodeId;
-        // mark node as generating (so UI can show spinner/blur)
+        // mark node as generating (so UI can show spinner/blur) — use captured prompt
         nodeCanvasRef.current.updateNode(targetNodeId, {
-          data: { status: "generating", prompt, model: panelValues.model?.selected },
+          data: { status: "generating", prompt: currentPrompt, model: panelValues.model?.selected },
         });
         // refresh selectedNode object if it matches
         const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetNodeId) ?? null;
@@ -506,12 +508,13 @@ export default function Page() {
     } else {
       currentTargetRef.current = null;
     }
-
+  
     setMode("generating"); // explicit transition
-
+  
     try {
-      const create = await createPrediction(prompt, options);
-
+      // pass the captured prompt to createPrediction
+      const create = await createPrediction(currentPrompt, options);
+  
       // If the create endpoint returned a full prediction object (no id)
       if (create.rawPrediction) {
         const raw = create.rawPrediction;
@@ -528,32 +531,54 @@ export default function Page() {
               const placeholderId = findPlaceholderNodeId();
               if (placeholderId) tId = placeholderId;
             }
-
+  
             if (tId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
               nodeCanvasRef.current.updateNode(tId, {
-                data: { image: last, status: "done", prompt, model: panelValues.model?.selected },
+                data: { image: last, status: "done", prompt: currentPrompt, model: panelValues.model?.selected },
               });
               const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === tId) ?? null;
               if (updated) setSelectedNode(updated);
+            } else if (mode === 'edit' && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
+              // In edit mode: create a new node and connect selected -> new node
+              try {
+                const newNodeId = nodeCanvasRef.current.addImageNode({
+                  image: last,
+                  prompt: currentPrompt,
+                  model: panelValues.model?.selected,
+                  position: {
+                    x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80,
+                    y: (selectedNode.y ?? 0),
+                  },
+                  width: 260,
+                  height: 180,
+                });
+                if (newNodeId && nodeCanvasRef.current?.addEdge) {
+                  nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newNodeId });
+                }
+              } catch (err) {
+                console.error('Failed to add/connect new node, falling back to enqueue', err);
+                enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
+              }
             } else {
-              enqueueOrAddImageNode({ imageUrl: last, promptText: prompt, modelName: panelValues.model?.selected });
+              enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
             }
           }
         }
-
+  
         setGenerating(false);
         setMode("edit");
         currentTargetRef.current = null;
+        latestGenerationPromptRef.current = "";
         return;
       }
-
+  
       const id = create.id;
       if (!isValidId(id)) {
         throw new Error("No valid prediction id returned from create endpoint.");
       }
-
+  
       setPredictionId(id);
-
+  
       // immediate fetch once
       const first = await fetchPrediction(id);
       setPrediction(first);
@@ -561,7 +586,7 @@ export default function Page() {
       if (out) {
         const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
         setImages(arr);
-
+  
         // If immediate success already:
         if (first.status === "succeeded") {
           const last = arr[arr.length - 1];
@@ -572,24 +597,45 @@ export default function Page() {
               const placeholderId = findPlaceholderNodeId();
               if (placeholderId) tId = placeholderId;
             }
-
+  
             if (tId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
               nodeCanvasRef.current.updateNode(tId, {
-                data: { image: last, status: "done", prompt, model: panelValues.model?.selected },
+                data: { image: last, status: "done", prompt: currentPrompt, model: panelValues.model?.selected },
               });
               const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === tId) ?? null;
               if (updated) setSelectedNode(updated);
+            } else if (mode === 'edit' && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
+              try {
+                const newNodeId = nodeCanvasRef.current.addImageNode({
+                  image: last,
+                  prompt: currentPrompt,
+                  model: panelValues.model?.selected,
+                  position: {
+                    x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80,
+                    y: (selectedNode.y ?? 0),
+                  },
+                  width: 260,
+                  height: 180,
+                });
+                if (newNodeId && nodeCanvasRef.current?.addEdge) {
+                  nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newNodeId });
+                }
+              } catch (err) {
+                console.error('Failed to add/connect new node, falling back to enqueue', err);
+                enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
+              }
             } else {
-              enqueueOrAddImageNode({ imageUrl: last, promptText: prompt, modelName: panelValues.model?.selected });
+              enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
             }
           }
-
+  
           setGenerating(false);
           setMode("edit");
           currentTargetRef.current = null;
+          latestGenerationPromptRef.current = "";
           return;
         }
-
+  
         // partial preview -> show preview mode
         if (arr.length && first.status !== "succeeded") {
           setMode("preview");
@@ -605,7 +651,7 @@ export default function Page() {
       } else {
         setMode("generating");
       }
-
+  
       startPolling(id);
     } catch (err) {
       console.error("handleGenerate error:", err);
@@ -613,6 +659,7 @@ export default function Page() {
       setGenerating(false);
       setMode("create");
       currentTargetRef.current = null;
+      latestGenerationPromptRef.current = "";
     }
   }
 
@@ -736,7 +783,7 @@ export default function Page() {
                     className="rounded-xs bg-button-create max-h-[34px] px-2.5 py-2 text-black text-medium leading-4 font-medium hover:cursor-pointer disabled:cursor-not-allowed"
                     disabled={generating}
                   >
-                    {generating ? "Generating..." : "Create"}
+                    {generating ? "Generating..." : mode === "edit" ? "Edit" : "Create"}
                   </button>
                 </div>
               </div>

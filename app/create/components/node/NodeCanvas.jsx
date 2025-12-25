@@ -343,7 +343,7 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect }, ref) {
       const clientY = e.clientY;
       const worldBefore = clientToWorld({ clientX, clientY });
       const delta = -e.deltaY;
-      const factor = Math.exp(delta * 0.0056);
+      const factor = Math.exp(delta * 0.0086);
       const newScale = clamp(scale * factor, MIN_SCALE, MAX_SCALE);
       setScale(newScale);
       const cx = clientX - rect.left;

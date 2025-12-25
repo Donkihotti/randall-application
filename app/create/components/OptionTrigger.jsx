@@ -27,7 +27,7 @@ export default function OptionTrigger({
 
   return (
     <div
-      className="relative flex flex-row justify-between items-center w-full hover:bg-secondary pl-2 py-1"
+      className="relative flex flex-row justify-between z-50 items-center w-full hover:bg-secondary pl-2 py-1"
       onPointerEnter={() => openPanel()}
       onPointerLeave={() => leavePanel(120)}
     >
