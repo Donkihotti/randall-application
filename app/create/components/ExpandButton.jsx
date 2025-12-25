@@ -97,6 +97,7 @@ export default function ExpandButton({ src, alt = 'image', cover = false, classN
           role="dialog"
           aria-modal="true"
           onClick={onOverlayClick}
+          className='bg-main/90'
           style={{
             position: 'fixed',
             inset: 0,
@@ -104,7 +105,6 @@ export default function ExpandButton({ src, alt = 'image', cover = false, classN
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: 'rgba(2,6,23,0.9)',
             padding: 20,
           }}
         >

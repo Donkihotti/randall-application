@@ -1,37 +1,140 @@
 // components/node/ImageNode.jsx
 import React from "react";
 
-export default function ImageNode({ node, onRemove }) {
-  // node = { id, x, y, width, height, data: { image, prompt, model, status } }
+/**
+ * Presentational ImageNode — does NOT position itself.
+ * Props:
+ *  - node: { id, x, y, width, height, data: { image, prompt, model, status } }
+ *  - isSelected: boolean
+ *  - onRemove(id)
+ *  - onStartConnection(ev, node, port) // port: 'output'|'input'
+ */
+export default function ImageNode({ node, isSelected = false, onRemove, onStartConnection }) {
   const { data = {} } = node;
+  const { image, prompt, model, status } = data;
+
+  const portStyleBase = {
+    position: "absolute",
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 30,
+    boxSizing: "border-box",
+    userSelect: "none",
+  };
+
   return (
     <div
-      className="absolute bg-white border rounded-md shadow overflow-hidden"
       style={{
-        left: node.x,
-        top: node.y,
-        width: node.width ?? 220,
-        height: node.height ?? 160,
-        boxSizing: "border-box",
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        background: "#fff",
+        borderRadius: 8,
+        overflow: "hidden",
+        boxShadow: isSelected ? "0 6px 18px rgba(13, 60, 180, 0.12)" : "0 4px 8px rgba(0,0,0,0.06)",
+        userSelect: "none",
+        position: "relative",
       }}
       data-node-id={node.id}
     >
-      <div className="flex items-center justify-between px-2 py-1 bg-slate-50 border-b text-xs">
-        <div className="truncate">{data.model ?? "model"}</div>
-        <button onClick={() => onRemove?.(node.id)} className="text-xs px-2">✕</button>
+      {/* LEFT (input) port — CENTERED vertically */}
+      <div
+        data-port="input"
+        onPointerDown={(e) => {
+          // We don't start connections from the input by default, but keep pointer events.
+          e.stopPropagation();
+        }}
+        style={{
+          ...portStyleBase,
+          left: -8,
+          top: "50%",
+          transform: "translateY(-50%)",
+          background: "#fff",
+          border: "2px solid rgba(15,23,42,0.06)",
+        }}
+        title="Input port"
+      >
+        <div style={{ width: 6, height: 6, borderRadius: 3, background: "#9ca3af" }} />
       </div>
 
-      <div className="w-full h-full bg-slate-100 flex items-center justify-center">
-        {data.image ? (
-          <img src={data.image} alt={data.prompt ?? "generated"} className="w-full h-full object-cover" />
+      {/* header */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          padding: "6px 12px",
+          borderBottom: "1px solid rgba(0,0,0,0.06)",
+          background: "rgba(0,0,0,0.02)",
+          fontSize: 12,
+        }}
+      >
+        <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {model ?? "model"}
+        </div>
+
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove?.(node.id);
+            }}
+            title="Remove node"
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: "2px 6px",
+              cursor: "pointer",
+              fontSize: 12,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {/* image area */}
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "#f6f7f9" }}>
+        {image ? (
+          <img
+            src={image}
+            alt={prompt ?? "generated"}
+            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "cover", display: "block" }}
+            draggable={false}
+          />
         ) : (
-          <div className="text-xs text-slate-500 p-2">
-            {data.status === "generating" ? "Generating…" : "No image"}
+          <div style={{ textAlign: "center", color: "rgba(0,0,0,0.45)", fontSize: 12, padding: 8 }}>
+            {status === "generating" ? "Generating…" : "Empty node — create image"}
           </div>
         )}
       </div>
 
-      <div className="px-2 py-1 text-xs text-slate-600 border-t">{data.prompt ?? ""}</div>
+      {/* RIGHT (output) port — CENTERED vertically */}
+      <div
+        data-port="output"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onStartConnection?.(e, node, "output");
+        }}
+        style={{
+          ...portStyleBase,
+          right: -8,
+          top: "50%",
+          transform: "translateY(-50%)",
+          background: "#e6eefc",
+          border: "1px solid rgba(59,130,246,0.6)",
+          cursor: "crosshair",
+        }}
+        title="Start connection"
+      >
+        <div style={{ width: 7, height: 7, borderRadius: 3.5, background: "#3b82f6" }} />
+      </div>
     </div>
   );
 }

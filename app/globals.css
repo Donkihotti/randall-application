@@ -78,10 +78,14 @@
   --color-menu: var(--menu);
   --color-canvas: var(--gray-1);
 
+  --color-ring: var(--gray-12); 
+
   --color-button-create: var(--gray-5);
   --color-main-white: var(--gray-5);
   --color-text-secondary: var(--gray-9); 
   --color-text-white-secondary: var(--gray-11); 
+
+  --color-button-disabled: var(--gray-13); 
 
   --color-select-dark: var(--gray-10); 
 
@@ -156,6 +160,8 @@
     --gray-9: #595959;
     --gray-10: #141414; 
     --gray-11: #ABABAB; 
+    --gray-12: #404040;
+    --gray-13: #8A8A8A; 
 
     --sidemenu-text: 14px; 
     --header: 64px;
