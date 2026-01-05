@@ -1,5 +1,5 @@
 // components/node/ImageNode.jsx
-import React from "react";
+import React, { useState } from "react";
 
 /**
  * Presentational ImageNode — does NOT position itself.
@@ -12,6 +12,14 @@ import React from "react";
 export default function ImageNode({ node, isSelected = false, onRemove, onStartConnection }) {
   const { data = {} } = node;
   const { image, prompt, model, status } = data;
+  const [ isHovering, setIsHovering ] = useState(false); 
+
+  const handleMouseEnter = () => { 
+    setIsHovering(true); 
+  }
+  const handleMouseLeave = () => { 
+    setIsHovering(false); 
+  }
 
   const portStyleBase = {
     position: "absolute",
@@ -28,6 +36,8 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
 
   return (
     <div
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
       style={{
         width: "100%",
         height: "100%",
@@ -36,9 +46,8 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
         background: "#fff",
         borderRadius: 8,
         overflow: "hidden",
-        boxShadow: isSelected ? "0 6px 18px rgba(13, 60, 180, 0.12)" : "0 4px 8px rgba(0,0,0,0.06)",
         userSelect: "none",
-        position: "relative",
+        position: "relative", 
       }}
       data-node-id={node.id}
     >
@@ -63,17 +72,16 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
       </div>
 
       {/* image area */}
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "#f6f7f9" }}>
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", }} className="bg-main">
         {image ? (
           <img
             src={image}
             alt={prompt ?? "generated"}
             style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "cover",  display: "block" }}
-     
             draggable={false}
           />
         ) : (
-          <div style={{ textAlign: "center", color: "rgba(0,0,0,0.45)", fontSize: 12, padding: 8 }}>
+          <div style={{ textAlign: "center", fontSize: 12, padding: 8 }} className="bg-main">
             {status === "generating" ? "Generating…" : "Empty node — create image"}
           </div>
         )}
@@ -99,6 +107,11 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
       >
         <div style={{ width: 7, height: 7, borderRadius: 3.5, background: "#3b82f6" }} />
       </div>
+      { isHovering && ( 
+        <div className="w-24 h-4 bg-white">
+            <p className="text-black">{prompt}</p>
+        </div>
+      )}
     </div>
   );
 }

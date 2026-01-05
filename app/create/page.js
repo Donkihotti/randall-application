@@ -1,7 +1,10 @@
-// app/page.js (or pages/index.jsx) — client component
+// app/page.js (app router) — patched, drop-in ready
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { createClient } from "@supabase/supabase-js";
+
 import Tools from "./components/Tools";
 import DownloadButton from "./components/DownloadButton";
 import ExpandButton from "./components/ExpandButton";
@@ -10,11 +13,20 @@ import NodeCanvas from "./components/node/NodeCanvas";
 import ImageContainer from "./components/ImageContainer";
 import EditSideBar from "./components/edit/EditSideBar";
 import EditScreen from "./components/edit/EditScreen";
+import ProtectedRoute from "../components/ProtectedRoute";
+
+import { finalizeGeneratedImage } from "@/lib/finalize";
+
+// supabase browser client (RLS enforced). Ensure NEXT_PUBLIC_* env vars exist.
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 export default function Page() {
   // ---- Core UI state ----
   const [prompt, setPrompt] = useState("");
-  const latestGenerationPromptRef = useRef('');
+  const latestGenerationPromptRef = useRef("");
+  const processedPredictionsRef = useRef(new Set());
   const [generating, setGenerating] = useState(false);
   const [predictionId, setPredictionId] = useState(null);
   const [prediction, setPrediction] = useState(null);
@@ -23,10 +35,15 @@ export default function Page() {
   const [referenceUrls, setReferenceUrls] = useState([]);
   const pollRef = useRef(null);
 
+  const searchParams = useSearchParams();
+  const [currentProjectId, setCurrentProjectId] = useState(null);
+
   const [mode, setMode] = useState("create"); // 'create'|'generating'|'preview'|'edit'
 
   // ---- Node canvas refs & selection ----
   const nodeCanvasRef = useRef(null);
+
+  // Selected node object (from canvas). We store it in state.
   const [selectedNode, setSelectedNode] = useState(null);
 
   // When a generation starts that targets a selected node or placeholder, we lock the target here
@@ -36,7 +53,10 @@ export default function Page() {
   // Pending node payloads when NodeCanvas isn't mounted yet
   const [pendingNodeQueue, setPendingNodeQueue] = useState([]);
 
-  const latest = images.length ? images[images.length - 1] : null;
+  const latestImage = images.length ? images[images.length - 1] : null;
+
+  // dedupe set of canvas node ids already added (prevents duplicate adds on hydration/finalize)
+  const addedNodeIdsRef = useRef(new Set());
 
   // files + uploads
   const [files, setFiles] = useState([]);
@@ -111,24 +131,271 @@ export default function Page() {
     output_format: panelValues.output?.selected ?? "png",
   };
 
+  // read projectId from querystring once
+  useEffect(() => {
+    const pid = searchParams?.get("projectId");
+    if (pid) setCurrentProjectId(pid);
+  }, [searchParams]);
+
+  // helper: add node to canvas with dedupe by id (uses addedNodeIdsRef)
+  const addNodeToCanvas = useCallback(
+    async ({ id = null, image = null, prompt = "", model = "", position = null, width = 260, height = 180 } = {}) => {
+      // if id provided and already added, short-circuit
+      if (id && addedNodeIdsRef.current.has(id)) return id;
+  
+      // If we have a project, prefer server-first flow:
+      if (currentProjectId) {
+        try {
+          // Build payload for server. If image is a remote URL (external) we'll pass as externalUrl.
+          // If image is already a signedUrl / data URL you can also pass it; server code handles fetch/upload.
+          const payload = {
+            externalUrl: image || null,
+            x: position?.x ?? 120,
+            y: position?.y ?? 120,
+            width,
+            height,
+            data: { prompt, model },
+          };
+  
+          const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+  
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            console.warn("Server node create failed:", res.status, text);
+            throw new Error("Server node create failed");
+          }
+  
+          const json = await res.json().catch(() => ({}));
+          const nodeRow = json?.node ?? null;
+          const signedUrl = json?.signedUrl ?? null;
+
+          
+  
+          if (!nodeRow || !nodeRow.id) {
+            console.warn("Server returned no node id, falling back to local add", json);
+            // fallback to local add if server didn't return an id
+            const localId = nodeCanvasRef.current?.addImageNode?.({ id, image, prompt, model, position, width, height });
+            if (localId) addedNodeIdsRef.current.add(localId);
+            return localId;
+          }
+  
+          // add (idempotent) to canvas using server id and signed url for immediate display
+          nodeCanvasRef.current?.addImageNode?.({
+            id: nodeRow.id,
+            image: signedUrl ?? null,
+            prompt: nodeRow.data?.prompt ?? prompt,
+            model: nodeRow.data?.model ?? model,
+            position: { x: nodeRow.x ?? payload.x, y: nodeRow.y ?? payload.y },
+            width: nodeRow.width ?? width,
+            height: nodeRow.height ?? height,
+          });
+  
+          addedNodeIdsRef.current.add(nodeRow.id);
+          return nodeRow.id;
+        } catch (err) {
+          console.warn("addNodeToCanvas server-first failed, falling back to local add:", err);
+          // fallback local
+        }
+      }
+  
+      // If no project or server flow failed — local add (same as before)
+      if (!nodeCanvasRef.current) {
+        // queue if not ready
+        setPendingNodeQueue((q) => [...q, { id, image, prompt, model, position, width, height }]);
+        return null;
+      }
+  
+      // final local add
+      const newId = nodeCanvasRef.current.addImageNode({
+        id,
+        image,
+        prompt,
+        model,
+        position,
+        width,
+        height,
+      });
+      const effectiveId = id || newId;
+      if (effectiveId) addedNodeIdsRef.current.add(effectiveId);
+      return effectiveId;
+    },
+    [currentProjectId]
+  );
+
+  // Hydrate project nodes & edges when projectId changes (drop-in replacement)
+useEffect(() => {
+  if (!currentProjectId) return;
+  let mounted = true;
+
+  // small helper: wait for nodeCanvasRef.current to become available
+  async function waitForCanvasReady(timeoutMs = 3000, intervalMs = 50) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (nodeCanvasRef.current && typeof nodeCanvasRef.current.addImageNode === "function" && typeof nodeCanvasRef.current.getNodes === "function") {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return !!(nodeCanvasRef.current && typeof nodeCanvasRef.current.addImageNode === "function");
+  }
+
+  async function loadProject() {
+    const ready = await waitForCanvasReady();
+    if (!mounted) return;
+
+    // clear canvas and dedupe set
+    if (nodeCanvasRef.current?.clear) nodeCanvasRef.current.clear();
+    addedNodeIdsRef.current.clear();
+
+    // fetch nodes via supabase client (RLS enforced)
+    const { data: nodesData = [], error: nodesErr } = await supabase
+      .from("nodes")
+      .select("id, x, y, width, height, data")
+      .eq("project_id", currentProjectId);
+
+    if (nodesErr) {
+      console.error("loadProject nodes fetch failed", nodesErr);
+      return;
+    }
+
+    // collect storage paths to request signed urls in one call
+    const storagePaths = Array.from(
+      new Set(
+        (nodesData || [])
+          .map((r) => r?.data?.image)
+          .filter(Boolean)
+          .filter((p) => !/^https?:\/\//i.test(p) && !p.includes("/storage/v1/object/sign/"))
+      )
+    );
+
+    let signedUrlsMap = {};
+    if (storagePaths.length > 0) {
+      try {
+        const r = await fetch("/api/getSignedUrl", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paths: storagePaths }),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          signedUrlsMap = j.signedUrls ?? {};
+        } else {
+          console.warn("getSignedUrl failed", await r.text());
+        }
+      } catch (err) {
+        console.warn("getSignedUrl request error", err);
+      }
+    }
+    
+    // Add nodes deterministically
+    for (const nodeRow of nodesData) {
+      if (!mounted) return;
+    
+      const rawImageVal = nodeRow?.data?.image;
+      let displayImage = null;
+    
+      // If data.image is an absolute URL — use it directly.
+      if (rawImageVal && /^https?:\/\//i.test(rawImageVal)) {
+        displayImage = rawImageVal;
+      } else if (rawImageVal) {
+        // It's likely a storage path -> look up signed URL from the map.
+        displayImage = signedUrlsMap[rawImageVal] ?? null;
+    
+        // If we didn't get a signed URL (null), try a single-path retry (helps if the initial batch failed).
+        if (!displayImage) {
+          try {
+            const rr = await fetch("/api/getSignedUrl", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ paths: [rawImageVal] }),
+            });
+            if (rr.ok) {
+              const jj = await rr.json();
+              displayImage = jj.signedUrls?.[rawImageVal] ?? null;
+            }
+          } catch (e) {
+            // ignore retry failure
+          }
+        }
+      }
+    
+      // If already added (dedupe), skip
+      if (addedNodeIdsRef.current.has(nodeRow.id)) continue;
+    
+      try {
+        nodeCanvasRef.current.addImageNode({
+          id: nodeRow.id,
+          image: displayImage, // either signed url, external url, or null (empty node)
+          prompt: nodeRow.data?.prompt ?? "",
+          model: nodeRow.data?.model ?? "",
+          position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
+          width: nodeRow.width ?? 260,
+          height: nodeRow.height ?? 180,
+        });
+        addedNodeIdsRef.current.add(nodeRow.id);
+      } catch (err) {
+        console.warn("Failed to add node to canvas during hydration", nodeRow.id, err);
+      }
+    }
+
+    // Load edges
+    const { data: edgesData = [], error: edgesErr } = await supabase
+      .from("edges")
+      .select("id, source_node, target_node")
+      .eq("project_id", currentProjectId);
+
+    if (edgesErr) {
+      console.warn("Failed to fetch edges", edgesErr);
+    } else {
+      // add edges if both endpoints present
+      const existingNodes = new Set((nodeCanvasRef.current?.getNodes?.() || []).map(n => n.id));
+      const existingEdges = new Set((nodeCanvasRef.current?.getEdges?.() || []).map(e => `${e.sourceId}__${e.targetId}`));
+      for (const eRow of edgesData) {
+        if (!mounted) return;
+        const key = `${eRow.source_node}__${eRow.target_node}`;
+        if (existingEdges.has(key)) continue;
+        if (!existingNodes.has(eRow.source_node) || !existingNodes.has(eRow.target_node)) {
+          console.warn("Skipping edge because node(s) missing", eRow);
+          continue;
+        }
+        nodeCanvasRef.current.addEdge?.({ sourceId: eRow.source_node, targetId: eRow.target_node });
+      }
+    }
+  }
+
+  loadProject();
+  return () => { mounted = false; };
+}, [currentProjectId]);
+
   // ===== Node queue flush (when NodeCanvas becomes ready) =====
   useEffect(() => {
     if (!nodeCanvasRef.current) return;
     if (!pendingNodeQueue || pendingNodeQueue.length === 0) return;
-
-    pendingNodeQueue.forEach((item) => {
-      try {
-        nodeCanvasRef.current.addImageNode?.(item);
-      } catch (e) {
-        console.error("Failed to flush pending node to NodeCanvas", e, item);
+  
+    let cancelled = false;
+  
+    (async () => {
+      for (const item of pendingNodeQueue) {
+        if (cancelled) break;
+        try {
+          // await server-first add
+          await addNodeToCanvas(item);
+        } catch (err) {
+          console.error("Failed to flush pending node to NodeCanvas", err, item);
+        }
       }
-    });
-    setPendingNodeQueue([]);
-  }, [pendingNodeQueue]);
+      if (!cancelled) setPendingNodeQueue([]);
+    })();
+  
+    return () => { cancelled = true; };
+  }, [pendingNodeQueue, addNodeToCanvas]);
 
   // ---- Helpers for node add/update ----
   function findPlaceholderNodeId() {
-    // returns the id of the first node that looks like the placeholder (no data.image)
     const nodes = nodeCanvasRef.current?.getNodes?.() ?? null;
     if (!nodes || !Array.isArray(nodes)) return null;
     const placeholder = nodes.find((n) => !n?.data?.image);
@@ -140,8 +407,6 @@ export default function Page() {
       console.warn("enqueueOrAddImageNode called with invalid imageUrl:", imageUrl);
       return;
     }
-
-    const payload = { image: imageUrl, prompt: promptText, model: modelName };
 
     // Prefer updating the selected node if we're not in edit mode
     if (mode !== "edit" && selectedNode?.id && nodeCanvasRef.current?.updateNode) {
@@ -173,73 +438,47 @@ export default function Page() {
     }
 
     // Otherwise add a new node (immediate or queued)
-    if (nodeCanvasRef.current?.addImageNode) {
-      try {
-        nodeCanvasRef.current.addImageNode(payload);
-      } catch (err) {
-        console.error("addImageNode threw", err);
-        setPendingNodeQueue((q) => [...q, payload]);
-      }
-    } else {
-      setPendingNodeQueue((q) => [...q, payload]);
-    }
+    addNodeToCanvas({ image: imageUrl, prompt: promptText, model: modelName });
   }
 
   function addEmptyNode({ position = null, width = 260, height = 180 } = {}) {
-    const payload = { image: null, prompt: "", model: "", position, width, height };
-
-    if (nodeCanvasRef.current?.addImageNode) {
-      try {
-        nodeCanvasRef.current.addImageNode(payload);
-      } catch (err) {
-        console.error("addImageNode threw while adding empty node", err);
-        setPendingNodeQueue((q) => [...q, payload]);
-      }
-    } else {
-      setPendingNodeQueue((q) => [...q, payload]);
-    }
+    addNodeToCanvas({ image: null, prompt: "", model: "", position, width, height });
   }
 
+  // keyboard delete/backspace handler — don't run while typing
   useEffect(() => {
     const isTypingInEditable = (ev) => {
-      // prefer to check the activeElement; fallback to event target if needed
-      const el = document.activeElement ?? ev.target;
+      const el = document.activeElement ?? ev?.target;
       if (!el) return false;
       const tag = el.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+      if (tag === "INPUT" || tag === "TEXTAREA") return true;
       if (el.isContentEditable) return true;
       return false;
     };
-  
+
     function onKeyDown(e) {
-      // ignore IME composition
       if (e.isComposing) return;
-  
-      // only handle Delete/Backspace when NOT typing in an input/textarea/contenteditable
-      if ((e.key === "Delete" || e.key === "Backspace")) {
-        if (isTypingInEditable(e)) {
-          // let the browser perform the normal editing behavior
-          return;
-        }
-  
-        // nothing to do if we don't have a selected node
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (isTypingInEditable(e)) return; // don't intercept while typing
         if (!selectedNode?.id) return;
-  
+
         try {
           if (nodeCanvasRef.current?.removeNode) {
             nodeCanvasRef.current.removeNode(selectedNode.id);
           } else {
-            console.warn('NodeCanvas.removeNode not available');
+            console.warn("NodeCanvas.removeNode not available");
           }
         } catch (err) {
-          console.error('Failed to remove node', err);
+          console.error("Failed to remove node", err);
         }
+        // remove from dedupe set
+        if (selectedNode?.id) addedNodeIdsRef.current.delete(selectedNode.id);
         setSelectedNode(null);
       }
     }
-  
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedNode]);
 
   // ===== File handlers =====
@@ -340,6 +579,13 @@ export default function Page() {
 
   // ===== Polling loop (keeps pred up to date) =====
   function startPolling(id) {
+    if (!id) return;
+    // If we've already processed this prediction id, don't start another poll
+    if (processedPredictionsRef.current.has(id)) {
+      console.debug("startPolling: prediction already processed", id);
+      return;
+    }
+
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -364,7 +610,7 @@ export default function Page() {
             if (targetIdForPreview && nodeCanvasRef.current?.updateNode) {
               try {
                 nodeCanvasRef.current.updateNode(targetIdForPreview, {
-                  data: { image: arr[arr.length - 1], status: pred.status === "succeeded" ? "done" : "processing" },
+                  data: { image: arr[arr.length - 1], status: pred.status === "succeeded" ? "done" : "processing", prompt: latestGenerationPromptRef.current || "" },
                 });
                 const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetIdForPreview) ?? null;
                 if (updated && selectedNode?.id === updated.id) setSelectedNode(updated);
@@ -380,69 +626,107 @@ export default function Page() {
         }
 
         if (pred.status === "succeeded") {
-          // finalization logic
-          const outFinal = pred.output || pred.result || pred.images;
-          if (outFinal) {
-            const arr = typeof outFinal === "string" ? [outFinal] : Array.isArray(outFinal) ? outFinal.flat() : [];
-            setImages(arr);
-
-            const last = arr[arr.length - 1];
-            if (last) {
-              // prefer locked target if available (lock set at generation start) OR placeholder
-              let targetId = currentTargetRef.current ?? null;
-
-              // If no locked target, try to find placeholder (replace it)
-              if (!targetId && mode !== "edit") {
-                const placeholderId = findPlaceholderNodeId();
-                if (placeholderId) targetId = placeholderId;
-              }
-
-              if (targetId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
-                try {
-                  nodeCanvasRef.current.updateNode(targetId, {
-                    data: { image: last, status: "done", prompt: latestGenerationPromptRef.current, model: panelValues.model?.selected },
-                  });
-                  const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetId) ?? null;
-                  if (updated) setSelectedNode(updated);
-                } catch (err) {
-                  console.error("updateNode failed, falling back to addImageNode", err);
-                  enqueueOrAddImageNode({ imageUrl: last, promptText: prompt, modelName: panelValues.model?.selected });
-                }
-              } if (mode === 'edit' && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
-                try {
-                  // create new node for the generated image
-                  const newNodeId = nodeCanvasRef.current.addImageNode({
-                    image: last,
-                    prompt: latestGenerationPromptRef.current,
-                    model: panelValues.model?.selected,
-                    position: { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) },
-                    width: 260,
-                    height: 180,
-                  });
-              
-                  // connect selectedNode -> newNode
-                  if (newNodeId && nodeCanvasRef.current?.addEdge) {
-                    nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newNodeId });
+          const procKey = `pred:${id}`;
+          if (processedPredictionsRef.current.has(procKey)) {
+            // already handled by some other path — just cleanup and return
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+            currentTargetRef.current = null;
+            setGenerating(false);
+            setMode("edit");
+          } else {
+            // optimistic mark
+            processedPredictionsRef.current.add(procKey);
+        
+            try {
+              // finalization logic (same as before)
+              const outFinal = pred.output || pred.result || pred.images;
+              if (outFinal) {
+                const arr = typeof outFinal === "string" ? [outFinal] : Array.isArray(outFinal) ? outFinal.flat() : [];
+                setImages(arr);
+        
+                const last = arr[arr.length - 1];
+                if (last) {
+                  const externalUrl = last;
+                  const projectId = currentProjectId ?? null;
+                  const positionForNewNode = selectedNode
+                    ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) }
+                    : { x: 120, y: 120 };
+        
+                  if (projectId) {
+                    try {
+                      const result = await finalizeGeneratedImage({
+                        externalUrl,
+                        projectId,
+                        position: positionForNewNode,
+                        prompt: latestGenerationPromptRef.current || "",
+                        model: panelValues.model?.selected,
+                        sourceNodeId: mode === "edit" ? selectedNode?.id : null,
+                        nodeCanvasRef,
+                      });
+        
+                      const nodeRow = result?.node;
+                      const signedUrl = result?.signedUrl ?? externalUrl;
+                      if (nodeRow) {
+                        addNodeToCanvas({
+                          id: nodeRow.id,
+                          image: signedUrl,
+                          prompt: nodeRow.data?.prompt ?? latestGenerationPromptRef.current ?? "",
+                          model: nodeRow.data?.model ?? panelValues.model?.selected,
+                          position: { x: nodeRow.x ?? positionForNewNode.x, y: nodeRow.y ?? positionForNewNode.y },
+                          width: nodeRow.width ?? 260,
+                          height: nodeRow.height ?? 180,
+                        });
+        
+                        if (result?.edge) {
+                          const edge = result.edge;
+                          const src = edge.source_node ?? edge.sourceId ?? edge.source;
+                          const tgt = edge.target_node ?? edge.targetId ?? edge.target;
+                          nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
+                        }
+                      } else {
+                        enqueueOrAddImageNode({ imageUrl: signedUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                      }
+        
+                      latestGenerationPromptRef.current = "";
+                    } catch (err) {
+                      // If finalize fails, remove optimistic mark so a retry can occur
+                      processedPredictionsRef.current.delete(procKey);
+                      console.warn("Server finalize failed in poller, falling back to local add:", err);
+                      if (mode === "edit" && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
+                        const newId = nodeCanvasRef.current.addImageNode({
+                          image: externalUrl,
+                          prompt: latestGenerationPromptRef.current || "",
+                          model: panelValues.model?.selected,
+                          position: positionForNewNode,
+                        });
+                        if (newId && nodeCanvasRef.current?.addEdge && mode === "edit" && selectedNode?.id) {
+                          nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newId });
+                        }
+                      } else {
+                        enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                      }
+                      latestGenerationPromptRef.current = "";
+                    }
+                  } else {
+                    enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                    latestGenerationPromptRef.current = "";
                   }
-                } catch (err) {
-                  console.error('Failed to add/connect new node, falling back to enqueue', err);
-                  enqueueOrAddImageNode({ imageUrl: last, promptText: prompt, modelName: panelValues.model?.selected });
                 }
-              } else {
-                // previous fallback behavior (existing)
-                enqueueOrAddImageNode({ imageUrl: last, promptText: prompt, modelName: panelValues.model?.selected });
               }
+        
+              if (pollRef.current) {
+                clearInterval(pollRef.current);
+                pollRef.current = null;
+              }
+              currentTargetRef.current = null;
+              setGenerating(false);
+              setMode("edit");
+            } catch (err) {
+              // in case of unexpected errors, remove optimistic mark
+              processedPredictionsRef.current.delete(procKey);
+              throw err; // let outer catch handle logging/state
             }
           }
-
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
-          // clear lock
-          currentTargetRef.current = null;
-          setGenerating(false);
-          setMode("edit");
         } else if (pred.status === "failed") {
           if (pollRef.current) {
             clearInterval(pollRef.current);
@@ -473,33 +757,28 @@ export default function Page() {
     setError(null);
     setImages([]);
     setPrediction(null);
-  
+
     // capture the prompt text immediately so we can clear the textarea for UX
     const currentPrompt = prompt ?? "";
     latestGenerationPromptRef.current = currentPrompt; // used by poller and finalization
     setPrompt(""); // clear the prompt box for the user
-  
+
     setGenerating(true);
-  
+
     // Decide target node: prefer selected node if not in 'edit' mode
-    // If there's no selection, prefer a placeholder node to replace (first node without an image)
     let targetNodeId = null;
     if (mode !== "edit" && selectedNode?.id) {
       targetNodeId = selectedNode.id;
     } else if (mode !== "edit") {
-      // look for placeholder
       targetNodeId = findPlaceholderNodeId();
     }
-  
+
     if (targetNodeId && nodeCanvasRef.current?.updateNode) {
       try {
-        // lock target for this generation (so later we update it)
         currentTargetRef.current = targetNodeId;
-        // mark node as generating (so UI can show spinner/blur) — use captured prompt
         nodeCanvasRef.current.updateNode(targetNodeId, {
           data: { status: "generating", prompt: currentPrompt, model: panelValues.model?.selected },
         });
-        // refresh selectedNode object if it matches
         const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetNodeId) ?? null;
         if (updated) setSelectedNode(updated);
       } catch (e) {
@@ -508,14 +787,12 @@ export default function Page() {
     } else {
       currentTargetRef.current = null;
     }
-  
-    setMode("generating"); // explicit transition
-  
+
+    setMode("generating");
+
     try {
-      // pass the captured prompt to createPrediction
       const create = await createPrediction(currentPrompt, options);
-  
-      // If the create endpoint returned a full prediction object (no id)
+
       if (create.rawPrediction) {
         const raw = create.rawPrediction;
         setPrediction(raw);
@@ -525,60 +802,69 @@ export default function Page() {
           setImages(arr);
           const last = arr[arr.length - 1];
           if (last) {
-            // Determine target: locked target first, then placeholder, otherwise add new
-            let tId = currentTargetRef.current ?? null;
-            if (!tId && mode !== "edit") {
-              const placeholderId = findPlaceholderNodeId();
-              if (placeholderId) tId = placeholderId;
-            }
-  
-            if (tId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
-              nodeCanvasRef.current.updateNode(tId, {
-                data: { image: last, status: "done", prompt: currentPrompt, model: panelValues.model?.selected },
-              });
-              const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === tId) ?? null;
-              if (updated) setSelectedNode(updated);
-            } else if (mode === 'edit' && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
-              // In edit mode: create a new node and connect selected -> new node
+            // Use the external URL as the key — stable for this generation
+            const externalUrl = last;
+            const procKey = `ext:${externalUrl}`;
+            if (processedPredictionsRef.current.has(procKey)) {
+              // already handled by another path — no-op
+            } else if (currentProjectId) {
+              // optimistic mark
+              processedPredictionsRef.current.add(procKey);
               try {
-                const newNodeId = nodeCanvasRef.current.addImageNode({
-                  image: last,
+                const res = await finalizeGeneratedImage({
+                  externalUrl,
+                  projectId: currentProjectId,
+                  position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
                   prompt: currentPrompt,
                   model: panelValues.model?.selected,
-                  position: {
-                    x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80,
-                    y: (selectedNode.y ?? 0),
-                  },
-                  width: 260,
-                  height: 180,
+                  sourceNodeId: mode === "edit" ? selectedNode?.id : null,
+                  nodeCanvasRef,
                 });
-                if (newNodeId && nodeCanvasRef.current?.addEdge) {
-                  nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newNodeId });
+      
+                if (res?.node) {
+                  const nodeRow = res.node;
+                  const signedUrl = res.signedUrl ?? externalUrl;
+                  addNodeToCanvas({
+                    id: nodeRow.id,
+                    image: signedUrl,
+                    prompt: nodeRow.data?.prompt ?? currentPrompt,
+                    model: nodeRow.data?.model ?? panelValues.model?.selected,
+                    position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
+                    width: nodeRow.width ?? 260,
+                    height: nodeRow.height ?? 180,
+                  });
+                  if (res?.edge) {
+                    const edge = res.edge;
+                    const src = edge.source_node ?? edge.sourceId ?? edge.source;
+                    const tgt = edge.target_node ?? edge.targetId ?? edge.target;
+                    nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
+                  }
+                } else {
+                  enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: currentPrompt, modelName: panelValues.model?.selected });
                 }
               } catch (err) {
-                console.error('Failed to add/connect new node, falling back to enqueue', err);
-                enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
+                // rollback optimistic mark so a retry can happen later
+                processedPredictionsRef.current.delete(procKey);
+                console.warn("Finalize failed (rawPrediction path)", err);
+                enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: currentPrompt, modelName: panelValues.model?.selected });
               }
             } else {
               enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
             }
           }
         }
-  
+      
         setGenerating(false);
         setMode("edit");
         currentTargetRef.current = null;
         latestGenerationPromptRef.current = "";
         return;
       }
-  
+
       const id = create.id;
-      if (!isValidId(id)) {
-        throw new Error("No valid prediction id returned from create endpoint.");
-      }
-  
+      if (!isValidId(id)) throw new Error("No valid prediction id returned from create endpoint.");
       setPredictionId(id);
-  
+
       // immediate fetch once
       const first = await fetchPrediction(id);
       setPrediction(first);
@@ -586,63 +872,73 @@ export default function Page() {
       if (out) {
         const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
         setImages(arr);
-  
-        // If immediate success already:
+
         if (first.status === "succeeded") {
-          const last = arr[arr.length - 1];
-          if (last) {
-            // Determine target: locked target first, then placeholder, otherwise add new
-            let tId = currentTargetRef.current ?? null;
-            if (!tId && mode !== "edit") {
-              const placeholderId = findPlaceholderNodeId();
-              if (placeholderId) tId = placeholderId;
-            }
-  
-            if (tId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
-              nodeCanvasRef.current.updateNode(tId, {
-                data: { image: last, status: "done", prompt: currentPrompt, model: panelValues.model?.selected },
-              });
-              const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === tId) ?? null;
-              if (updated) setSelectedNode(updated);
-            } else if (mode === 'edit' && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
-              try {
-                const newNodeId = nodeCanvasRef.current.addImageNode({
-                  image: last,
-                  prompt: currentPrompt,
-                  model: panelValues.model?.selected,
-                  position: {
-                    x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80,
-                    y: (selectedNode.y ?? 0),
-                  },
-                  width: 260,
-                  height: 180,
-                });
-                if (newNodeId && nodeCanvasRef.current?.addEdge) {
-                  nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newNodeId });
+          const procKey = `pred:${id}`;
+          if (!processedPredictionsRef.current.has(procKey)) {
+            // optimistic mark to avoid races with poller or other handlers
+            processedPredictionsRef.current.add(procKey);
+            const last = arr[arr.length - 1];
+            if (last) {
+              if (currentProjectId) {
+                try {
+                  const res = await finalizeGeneratedImage({
+                    externalUrl: last,
+                    projectId: currentProjectId,
+                    position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
+                    prompt: currentPrompt,
+                    model: panelValues.model?.selected,
+                    sourceNodeId: mode === "edit" ? selectedNode?.id : null,
+                    nodeCanvasRef,
+                  });
+        
+                  if (res?.node) {
+                    addNodeToCanvas({
+                      id: res.node.id,
+                      image: res.signedUrl ?? last,
+                      prompt: res.node.data?.prompt ?? currentPrompt,
+                      model: res.node.data?.model ?? panelValues.model?.selected,
+                      position: { x: res.node.x ?? 120, y: res.node.y ?? 120 },
+                      width: res.node.width ?? 260,
+                      height: res.node.height ?? 180,
+                    });
+                    if (res?.edge) {
+                      const edge = res.edge;
+                      const src = edge.source_node ?? edge.sourceId ?? edge.source;
+                      const tgt = edge.target_node ?? edge.targetId ?? edge.target;
+                      nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
+                    }
+                  } else {
+                    enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
+                  }
+                } catch (err) {
+                  // rollback processed mark so retry is possible
+                  processedPredictionsRef.current.delete(procKey);
+                  console.warn("Finalize failed (immediate success)", err);
+                  enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
                 }
-              } catch (err) {
-                console.error('Failed to add/connect new node, falling back to enqueue', err);
+              } else {
                 enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
               }
-            } else {
-              enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
             }
           }
-  
+          // proceed to cleanup
           setGenerating(false);
           setMode("edit");
           currentTargetRef.current = null;
           latestGenerationPromptRef.current = "";
           return;
         }
-  
-        // partial preview -> show preview mode
+
+        // partial preview
         if (arr.length && first.status !== "succeeded") {
           setMode("preview");
           const previewTarget = currentTargetRef.current ?? (mode !== "edit" ? selectedNode?.id : null);
           if (previewTarget && nodeCanvasRef.current?.updateNode) {
             try {
-              nodeCanvasRef.current.updateNode(previewTarget, { data: { image: arr[arr.length - 1], status: "processing" } });
+              nodeCanvasRef.current.updateNode(previewTarget, {
+                data: { image: arr[arr.length - 1], status: "processing", prompt: latestGenerationPromptRef.current || "" },
+              });
               const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === previewTarget) ?? null;
               if (updated) setSelectedNode(updated);
             } catch (e) {}
@@ -651,7 +947,7 @@ export default function Page() {
       } else {
         setMode("generating");
       }
-  
+
       startPolling(id);
     } catch (err) {
       console.error("handleGenerate error:", err);
@@ -679,10 +975,8 @@ export default function Page() {
     if (!url) return;
     setImages((prev) => [...prev, url]);
 
-    // attempt to update selected node if appropriate, otherwise add/replace placeholder
     const payload = { image: url, prompt, model: panelValues.model?.selected };
 
-    // prefer selected
     if (mode !== "edit" && selectedNode?.id && nodeCanvasRef.current?.updateNode) {
       try {
         nodeCanvasRef.current.updateNode(selectedNode.id, { data: { image: url, status: "done", prompt, model: panelValues.model?.selected } });
@@ -694,7 +988,6 @@ export default function Page() {
       }
     }
 
-    // else replace placeholder if present
     const placeholderId = findPlaceholderNodeId();
     if (placeholderId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
       try {
@@ -707,7 +1000,6 @@ export default function Page() {
       }
     }
 
-    // fallback: add
     enqueueOrAddImageNode(payload);
   }
 
@@ -715,110 +1007,168 @@ export default function Page() {
   const selectedRatio = panelValues.ratio?.selected ?? "9:16";
   const displaySrc = selectedNode?.data?.image ?? null;
 
-  // ---- Render ----
+  // IMPORTANT: NodeCanvas may call onNodeSelect synchronously during its imperative APIs.
+  // To avoid "Cannot update a component while rendering a different component" we defer setSelectedNode.
+  const handleNodeSelect = useCallback((node) => {
+    // defer to next tick — safe and avoids setState during child render
+    setTimeout(() => setSelectedNode(node), 0);
+  }, []);
+
+  const handleNodeChange = useCallback(async (node) => {
+    // persist node position/data to server if we have a project
+    if (!currentProjectId || !node?.id) return;
+    try {
+      await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes/${encodeURIComponent(node.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          x: Math.round(node.x),
+          y: Math.round(node.y),
+          width: node.width,
+          height: node.height,
+          data: node.data,
+        }),
+      });
+    } catch (err) {
+      console.warn("Failed to persist node change", err);
+    }
+  }, [currentProjectId]);
+  
+  const handleEdgeCreate = useCallback(async (edge) => {
+    if (!currentProjectId || !edge) return;
+    try {
+      // server expects source_node and target_node
+      await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceNode: edge.sourceId, targetNode: edge.targetId }),
+      });
+    } catch (err) {
+      console.warn("Failed to persist edge", err);
+    }
+  }, [currentProjectId]);
+  
+  const handleNodeRemove = useCallback(async (nodeId) => {
+    if (!currentProjectId || !nodeId) return;
+    try {
+      await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
+      addedNodeIdsRef.current.delete(nodeId);
+    } catch (err) {
+      console.warn("Failed to delete node on server", err);
+    }
+  }, [currentProjectId]);
+  
+  // Render
   return (
-    <div className="page-root bg-bg grid grid-rows-12 grid-cols-12 h-screen">
-      <section className="row-span-12 col-span-5 row-start-1 col-start-1 grid grid-cols-5 grid-rows-12 gap-2 p-2">
-        <div className="canvas col-span-5 row-span-8 bg-canvas rounded-md overflow-hidden">
-          <div className="w-full h-full">
-            <div className="w-full h-full p-2 flex items-center justify-center relative">
-              <div className="flex items-center gap-2 z-50 absolute top-1 right-1">
-                <button
-                  type="button"
-                  onClick={() => addEmptyNode()}
-                  className="button-icon px-2 text-medium"
-                  aria-label="Add node to canvas"
-                  title="Add empty node"
-                >
-                  new node
-                </button>
-              </div>
-
-              <NodeCanvas ref={nodeCanvasRef} onNodeSelect={setSelectedNode} />
-            </div>
-          </div>
-        </div>
-
-        <section className="col-span-5 row-span-4 bg-main rounded-md p-2 flex flex-col justify-end relative">
-          <div>{mode === "create" && <Tools onFilesAdded={handleFilesAdded} />}</div>
-
-          {mode === "create" && (
-            <OptionsButton panelDefinitions={panelDefinitions} panelValues={panelValues} setPanelValue={setPanelValue} />
-          )}
-
-          <form onSubmit={handleGenerate}>
-            <div className="flex flex-col gap-3">
-              <div className="w-full grid grid-cols-4 gap-x-2" />
-
-              <div className="rounded-md w-full bg-bg-light p-1.5 drop-shadow-md border-[0.5px] border-border-main h-40 flex flex-col">
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  rows={2}
-                  className="w-full textarea-default border-none text-medium h-2/3"
-                  style={{
-                    minHeight: 105,
-                    boxSizing: "border-box",
-                    outline: "none",
-                    whiteSpace: "pre-wrap",
-                    wordWrap: "break-word",
-                    color: "var(--text-light, #e5e7eb)",
-                    borderRadius: 8,
-                    background: "transparent",
-                  }}
-                  placeholder={`Type "/" to open references & models`}
-                />
-
-                <div
-                  className="h-5 w-full"
-                  style={{
-                    WebkitMaskImage: "linear-gradient(to bottom, black 0%, black 80%, transparent 100%)",
-                    maskImage: "linear-gradient(to bottom, black 0%, black 80%, transparent 100%)",
-                  }}
-                />
-
-                <div className="relative h-1/3 w-full flex justify-end">
+    <ProtectedRoute>
+      <div className="page-root bg-bg grid grid-rows-12 grid-cols-12 h-screen">
+        <section className="row-span-12 col-span-5 row-start-1 col-start-1 grid grid-cols-5 grid-rows-12 gap-2 p-2">
+          <div className="canvas col-span-5 row-span-8 bg-[#181818] rounded-md overflow-hidden">
+            <div className="w-full h-full">
+              <div className="w-full h-full p-2 flex items-center justify-center relative">
+                <div className="flex items-center gap-2 z-50 absolute top-1 right-1">
                   <button
-                    type="submit"
-                    className="rounded-xs bg-button-create max-h-[34px] px-2.5 py-2 text-black text-medium leading-4 font-medium hover:cursor-pointer disabled:cursor-not-allowed"
-                    disabled={generating}
+                    type="button"
+                    onClick={() => addEmptyNode()}
+                    className="button-icon px-2 text-medium"
+                    aria-label="Add node to canvas"
+                    title="Add empty node"
                   >
-                    {generating ? "Generating..." : mode === "edit" ? "Edit" : "Create"}
+                    new node
                   </button>
                 </div>
+
+                <NodeCanvas ref={nodeCanvasRef}
+                onNodeSelect={handleNodeSelect}
+                onNodeChange={handleNodeChange}
+                onEdgeCreate={handleEdgeCreate}
+                onNodeRemove={handleNodeRemove} 
+                />
               </div>
             </div>
-
-            {error && <div className="error">{error}</div>}
-          </form>
-        </section>
-      </section>
-
-      <section className="col-span-7 row-span-12 border-l border-border-main flex items-center justify-center relative">
-        <div className="absolute bottom-1 left-2 text-small text-text-white-secondary">
-          <span>
-            {currentMode + ": "}
-            {panelValues.model?.selected + "/ "}
-            {panelValues.ratio?.selected + "/ "}
-            {panelValues.quality?.level + "/"}
-            {panelValues.output.selected}
-          </span>
-        </div>
-
-        {mode === "edit" && (
-          <div>
-            <div className="flex flex-row gap-1 absolute left-2 top-2">
-              <DownloadButton src={displaySrc} filename={`generated-${Date.now()}.png`} className="button-icon z-10" />
-              <ExpandButton src={displaySrc} alt="image" className="button-icon" />
-            </div>
-            <div className="absolute right-0 z-50 top-0 h-full">
-              <EditSideBar selectedNode={selectedNode} />
-            </div>
           </div>
-        )}
 
-        <ImageContainer aspect={selectedRatio} src={displaySrc} alt="Generated image" />
-      </section>
-    </div>
+          <section className="col-span-5 row-span-4 bg-main rounded-md p-2 flex flex-col justify-end relative">
+            <div>{mode === "create" && <Tools onFilesAdded={handleFilesAdded} />}</div>
+
+            {mode === "create" && (
+              <OptionsButton panelDefinitions={panelDefinitions} panelValues={panelValues} setPanelValue={setPanelValue} />
+            )}
+
+            <form onSubmit={handleGenerate}>
+              <div className="flex flex-col gap-3">
+                <div className="w-full grid grid-cols-4 gap-x-2" />
+
+                <div className="rounded-md w-full bg-bg-light p-1.5 drop-shadow-md border-[0.5px] border-border-main h-40 flex flex-col">
+                  <textarea
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    rows={2}
+                    className="w-full textarea-default border-none text-medium h-2/3"
+                    style={{
+                      minHeight: 105,
+                      boxSizing: "border-box",
+                      outline: "none",
+                      whiteSpace: "pre-wrap",
+                      wordWrap: "break-word",
+                      color: "var(--text-light, #e5e7eb)",
+                      borderRadius: 8,
+                      background: "transparent",
+                    }}
+                    placeholder={`Type "/" to open references & models`}
+                  />
+
+                  <div
+                    className="h-5 w-full"
+                    style={{
+                      WebkitMaskImage: "linear-gradient(to bottom, black 0%, black 80%, transparent 100%)",
+                      maskImage: "linear-gradient(to bottom, black 0%, black 80%, transparent 100%)",
+                    }}
+                  />
+
+                  <div className="relative h-1/3 w-full flex justify-end">
+                    <button
+                      type="submit"
+                      className="rounded-xs bg-button-create max-h-[34px] px-2.5 py-2 text-black text-medium leading-4 font-medium hover:cursor-pointer disabled:cursor-not-allowed"
+                      disabled={generating}
+                    >
+                      {generating ? "Generating..." : mode === "edit" ? "Edit" : "Create"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {error && <div className="error">{error}</div>}
+            </form>
+          </section>
+        </section>
+
+        <section className="col-span-7 row-span-12 border-l border-border-main flex items-center justify-center relative">
+          <div className="absolute bottom-1 left-2 text-small text-text-white-secondary">
+            <span>
+              {currentMode + ": "}
+              {panelValues.model?.selected + "/ "}
+              {panelValues.ratio?.selected + "/ "}
+              {panelValues.quality?.level + "/"}
+              {panelValues.output.selected}
+            </span>
+          </div>
+
+          {mode === "edit" && (
+            <div>
+              <div className="flex flex-row gap-1 absolute left-2 top-2">
+                <DownloadButton src={displaySrc} filename={`generated-${Date.now()}.png`} className="button-icon z-10" />
+                <ExpandButton src={displaySrc} alt="image" className="button-icon" />
+              </div>
+              <div className="absolute right-0 z-50 top-0 h-full">
+                <EditSideBar selectedNode={selectedNode} />
+              </div>
+            </div>
+          )}
+
+          <ImageContainer aspect={selectedRatio} src={displaySrc} alt="Generated image" />
+        </section>
+      </div>
+    </ProtectedRoute>
   );
 }

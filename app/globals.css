@@ -85,6 +85,9 @@
   --color-text-secondary: var(--gray-9); 
   --color-text-white-secondary: var(--gray-11); 
 
+  --color-node: var(--gray-14);
+  --color-nodeSelected: var(--gray-15); 
+
   --color-button-disabled: var(--gray-13); 
 
   --color-select-dark: var(--gray-10); 
@@ -118,6 +121,7 @@
   --text-small: var(--sidemenu-text);
   --text-supersmall: var(--text-smallest);
   --text-paragraph: var(--text-medium);
+  --text-medium-plus: var(--text-normal);
 
 /*=====PADDING======*/
 
@@ -161,7 +165,9 @@
     --gray-10: #141414; 
     --gray-11: #ABABAB; 
     --gray-12: #404040;
-    --gray-13: #8A8A8A; 
+    --gray-13: #8A8A8A;
+    --gray-14: #2E2E2E;  
+    --gray-15: #ACACAC; 
 
     --sidemenu-text: 14px; 
     --header: 64px;
