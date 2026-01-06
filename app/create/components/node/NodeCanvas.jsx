@@ -16,7 +16,10 @@ function uid(prefix = "n_") {
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const toFixedNum = (n) => Number(n.toFixed(2));
 
-const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove }, ref) {
+const NodeCanvas = forwardRef(function NodeCanvas(
+  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove },
+  ref
+) {
   const containerRef = useRef(null);
 
   const [nodes, setNodes] = useState([]);
@@ -45,27 +48,21 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
   const [worldSize, setWorldSize] = useState({ w: 3000, h: 2000 });
 
   // ---------- coordinate helpers ----------
-  const clientToWorld = useCallback(
-    ({ clientX, clientY }) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return { x: 0, y: 0 };
-      const cx = clientX - rect.left;
-      const cy = clientY - rect.top;
-      return { x: (cx - translate.x) / scale, y: (cy - translate.y) / scale };
-    },
-    [scale, translate]
-  );
+  const clientToWorld = useCallback(({ clientX, clientY }) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    const cx = clientX - rect.left;
+    const cy = clientY - rect.top;
+    return { x: (cx - translate.x) / scale, y: (cy - translate.y) / scale };
+  }, [scale, translate]);
 
-  const worldToClient = useCallback(
-    ({ x, y }) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return { clientX: 0, clientY: 0 };
-      const cx = translate.x + x * scale + rect.left;
-      const cy = translate.y + y * scale + rect.top;
-      return { clientX: cx, clientY: cy };
-    },
-    [scale, translate]
-  );
+  const worldToClient = useCallback(({ x, y }) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return { clientX: 0, clientY: 0 };
+    const cx = translate.x + x * scale + rect.left;
+    const cy = translate.y + y * scale + rect.top;
+    return { clientX: cx, clientY: cy };
+  }, [scale, translate]);
 
   // ---------- recompute world size ----------
   useEffect(() => {
@@ -88,180 +85,156 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     setWorldSize({ w, h });
   }, [nodes]);
 
-  // ---------- removal helper (centralized) ----------
-  const removeNodeLocal = useCallback(
-    (id) => {
-      if (!id) return;
-      // remove node and touching edges
-      setNodes((prev) => prev.filter((n) => n.id !== id));
-      setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
+  // ---------- imperative API ----------
+  useImperativeHandle(ref, () => ({
+    /**
+     * Add image node.
+     * If `id` provided and matches existing node => update the node instead of adding duplicate.
+     * Returns the node id.
+     */
+    addImageNode({
+      id: providedId = null,
+      image = null,
+      prompt = "",
+      model = "",
+      position = null,
+      width = 260,
+      height = 180,
+    }) {
+      const idToUse = providedId || uid();
+      const defaultPos = { x: 80 + nodes.length * 40, y: 80 + nodes.length * 30 };
+      const pos = position || defaultPos;
 
-      // clear selection if it was selected (update synchronously)
-      setSelectedId((prevSel) => (prevSel === id ? null : prevSel));
+      // If node exists -> update it (idempotent). Otherwise add new.
+      setNodes((prev) => {
+        const existing = prev.find((n) => n.id === idToUse);
+        if (existing) {
+          return prev.map((n) =>
+            n.id === idToUse
+              ? {
+                  ...n,
+                  x: pos.x,
+                  y: pos.y,
+                  width,
+                  height,
+                  data: {
+                    ...(n.data || {}),
+                    image,
+                    prompt,
+                    model,
+                    status: image ? "done" : (n.data?.status || "empty"),
+                  },
+                }
+              : n
+          );
+        }
+        const node = {
+          id: idToUse,
+          x: pos.x,
+          y: pos.y,
+          width,
+          height,
+          data: { image, prompt, model, status: image ? "done" : "empty" },
+        };
+        return [...prev, node];
+      });
 
-      // defer parent notification to avoid setState-in-render issues
-      setTimeout(() => {
-        // if the removed node was selected, tell parent there is no selected node
-        onNodeSelect?.(null);
-      }, 0);
+      // After state update, select the node and notify parent.
+      requestAnimationFrame(() => {
+        setSelectedId(idToUse);
+        const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === idToUse) ?? null;
+        if (updated) onNodeSelect?.(updated);
+      });
+
+      return idToUse;
+    },
+
+    addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180 }) {
+      const world = clientToWorld({ clientX, clientY });
+      return ref.current?.addImageNode?.({ image, prompt, model, position: world, width, height });
+    },
+
+    updateNode(id, patch = {}) {
+      setNodes((prev) =>
+        prev.map((n) => {
+          if (n.id !== id) return n;
+          const merged = { ...n, ...patch };
+          merged.data = { ...(n.data || {}), ...(patch.data || {}) };
+          return merged;
+        })
+      );
+
+      // notify after update
+      requestAnimationFrame(() => {
+        setSelectedId(id);
+        const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === id) ?? null;
+        if (updated) {
+          onNodeSelect?.(updated);
+          // notify parent that node changed (persist)
+          onNodeChange?.(updated);
+        }
+      });
 
       return id;
     },
-    [onNodeSelect]
-  );
 
-  // ---------- imperative API ----------
-  useImperativeHandle(
-    ref,
-    () => ({
-      /**
-       * Add image node.
-       * If `id` provided and matches existing node => update the node instead of adding duplicate.
-       * Returns the node id.
-       */
-      addImageNode({
-        id: providedId = null,
-        image = null,
-        prompt = "",
-        model = "",
-        position = null,
-        width = 260,
-        height = 180,
-      }) {
-        const idToUse = providedId || uid();
-        const defaultPos = { x: 80 + nodes.length * 40, y: 80 + nodes.length * 30 };
-        const pos = position || defaultPos;
+    addEdge({ sourceId, targetId }) {
+      if (!sourceId || !targetId) return null;
+      // ensure nodes exist
+      const srcExists = nodes.some((n) => n.id === sourceId);
+      const tgtExists = nodes.some((n) => n.id === targetId);
+      if (!srcExists || !tgtExists) {
+        console.warn("addEdge: source or target does not exist", { sourceId, targetId });
+        return null;
+      }
+      // avoid duplicates
+      const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
+      if (exists) return null;
+      const edgeId = uid("edge_");
+      setEdges((prev) => {
+        const created = { id: edgeId, sourceId, targetId };
+        // also inform parent
+        onEdgeCreate?.(created);
+        return [...prev, created];
+      });
+      return edgeId;
+    },
 
-        // Update or add node atomically
-        setNodes((prev) => {
-          const existing = prev.find((n) => n.id === idToUse);
-          if (existing) {
-            return prev.map((n) =>
-              n.id === idToUse
-                ? {
-                    ...n,
-                    x: pos.x,
-                    y: pos.y,
-                    width,
-                    height,
-                    data: {
-                      ...(n.data || {}),
-                      image,
-                      prompt,
-                      model,
-                      status: image ? "done" : n.data?.status || "empty",
-                    },
-                  }
-                : n
-            );
-          }
-          const node = {
-            id: idToUse,
-            x: pos.x,
-            y: pos.y,
-            width,
-            height,
-            data: { image, prompt, model, status: image ? "done" : "empty" },
-          };
-          return [...prev, node];
-        });
+    removeNode(id) {
+      if (!id) return;
+      // remember whether it was selected so we can notify parent after the state change
+      const wasSelected = selectedId === id;
 
-        // After state update, select the node and notify parent ON NEXT FRAME to avoid sync setState during render
-        requestAnimationFrame(() => {
-          setSelectedId(idToUse);
-          const updatedNode = {
-            id: idToUse,
-            x: pos.x,
-            y: pos.y,
-            width,
-            height,
-            data: { image, prompt, model, status: image ? "done" : "empty" },
-          };
-          onNodeSelect?.(updatedNode);
-        });
+      setNodes((prev) => prev.filter((n) => n.id !== id));
+      setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
 
-        return idToUse;
-      },
+      // update selectedId state synchronously
+      setSelectedId((prev) => (prev === id ? null : prev));
 
-      addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180 }) {
-        const world = clientToWorld({ clientX, clientY });
-        // call the exposed API (this same object) — using ref.current could be undefined here for internal calls,
-        // but the returned object is what external code uses. We'll call the implemented method by grabbing it from 'this'
-        // However to keep it simple, call addImageNode via the ref if available, fallback to local call:
-        // NOTE: parent code should prefer using the exposed API rather than invoking this internal helper.
-        if (ref && ref.current && typeof ref.current.addImageNode === "function") {
-          return ref.current.addImageNode({ image, prompt, model, position: world, width, height });
-        }
-        // fallback: attempt to call implementation directly (unlikely path)
-        return undefined;
-      },
+      // Avoid calling onNodeSelect while rendering—defer to next tick
+      if (wasSelected) {
+        setTimeout(() => {
+          onNodeSelect?.(null);
+        }, 0);
+      }
+      return id;
+    },
 
-      updateNode(id, patch = {}) {
-        setNodes((prev) =>
-          prev.map((n) => {
-            if (n.id !== id) return n;
-            const merged = { ...n, ...patch };
-            merged.data = { ...(n.data || {}), ...(patch.data || {}) };
-            return merged;
-          })
-        );
+    getNodes() {
+      return nodes;
+    },
 
-        // notify after update (next frame)
-        requestAnimationFrame(() => {
-          setSelectedId(id);
-          const maybe = nodes.find((nn) => nn.id === id) ?? null;
-          // construct updated object from patch + existing (best-effort)
-          const updated = maybe ? { ...maybe, ...patch, data: { ...(maybe.data || {}), ...(patch.data || {}) } } : null;
-          if (updated) {
-            onNodeSelect?.(updated);
-          } else {
-            onNodeSelect?.(null);
-          }
-        });
+    getEdges() {
+      return edges;
+    },
 
-        return id;
-      },
-
-      addEdge({ sourceId, targetId }) {
-        if (!sourceId || !targetId) return null;
-        // ensure nodes exist
-        const srcExists = nodes.some((n) => n.id === sourceId);
-        const tgtExists = nodes.some((n) => n.id === targetId);
-        if (!srcExists || !tgtExists) {
-          console.warn("addEdge: source or target does not exist", { sourceId, targetId });
-          return null;
-        }
-        // avoid duplicates
-        const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
-        if (exists) return null;
-        const edgeId = uid("edge_");
-        setEdges((prev) => [...prev, { id: edgeId, sourceId, targetId }]);
-        return edgeId;
-      },
-
-      removeNode(id) {
-        return removeNodeLocal(id);
-      },
-
-      getNodes() {
-        // return a copy to prevent external mutation
-        return [...nodes];
-      },
-
-      getEdges() {
-        return [...edges];
-      },
-
-      clear() {
-        setNodes([]);
-        setEdges([]);
-        setSelectedId(null);
-        requestAnimationFrame(() => onNodeSelect?.(null));
-      },
-    }),
-    // NOTE: include removeNodeLocal and clientToWorld in deps so the API methods are recreated properly
-    [nodes, edges, onNodeSelect, clientToWorld, removeNodeLocal]
-  );
+    clear() {
+      setNodes([]);
+      setEdges([]);
+      setSelectedId(null);
+      requestAnimationFrame(() => onNodeSelect?.(null));
+    },
+  }), [nodes, edges, onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, clientToWorld]);
 
   // ---------- port coords ----------
   function getPortWorld(node, port) {
@@ -353,18 +326,15 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
         const hit = nodeAtWorld(w.x, w.y);
         const sourceId = connectingRef.current.sourceId;
         if (hit && hit.id !== sourceId) {
-            setEdges(prev => {
-                const exists = prev.some(ed => ed.sourceId === sourceId && ed.targetId === hit.id);
-                if (exists) return prev;
-                const eid = uid("edge_");
-                const newEdge = { id: eid, sourceId, targetId: hit.id };
-                // notify parent after DOM update
-                requestAnimationFrame(() => {
-                  try { onEdgeCreate?.(newEdge); } catch (e) { console.warn("onEdgeCreate handler failed", e); }
-                });
-                return [...prev, newEdge];
-              });
-            }
+          const newEdge = { id: uid("edge_"), sourceId, targetId: hit.id };
+          setEdges((prev) => {
+            const exists = prev.some(ed => ed.sourceId === sourceId && ed.targetId === hit.id);
+            if (exists) return prev;
+            // notify parent
+            onEdgeCreate?.(newEdge);
+            return [...prev, newEdge];
+          });
+        }
         connectingRef.current = null;
         setConnectingTargetWorld(null);
         setConnectHoverNode(null);
@@ -381,14 +351,11 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
           if (SNAP_ON_DROP) {
             nx = Math.round(nx / GRID_SIZE) * GRID_SIZE;
             ny = Math.round(ny / GRID_SIZE) * GRID_SIZE;
-            setNodes((prev) => prev.map((n) => (n.id === d.id ? { ...n, x: nx, y: ny } : n)));
-          } 
-          requestAnimationFrame(() => {
-            const moved = ref.current?.getNodes?.()?.find(n => n.id === d.id) ?? null;
-            if (moved) {
-              try { onNodeChange?.(moved); } catch (e) { console.warn("onNodeChange handler failed", e); }
-            }
-          });
+            setNodes((prev) => prev.map((n) => n.id === d.id ? { ...n, x: nx, y: ny } : n));
+          }
+          // notify parent about node change
+          const updated = { ...node, x: nx, y: ny };
+          onNodeChange?.(updated);
         }
         draggingRef.current = null;
       }
@@ -405,12 +372,9 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     return () => {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
-      if (rafPanRef.current) {
-        cancelAnimationFrame(rafPanRef.current);
-        rafPanRef.current = null;
-      }
+      if (rafPanRef.current) { cancelAnimationFrame(rafPanRef.current); rafPanRef.current = null; }
     };
-  }, [clientToWorld, nodes, edges, scale, translate]);
+  }, [clientToWorld, nodes, edges, scale, translate, onNodeChange, onEdgeCreate]);
 
   // ---------- node pointer down (drag) ----------
   const onNodePointerDown = (e, node) => {
@@ -421,14 +385,10 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     }
     e.stopPropagation();
     containerRef.current?.focus?.();
-    try {
-      e.currentTarget.setPointerCapture?.(e.pointerId);
-    } catch (_) {}
+    try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch (_) {}
     draggingRef.current = { id: node.id, startClientX: e.clientX, startClientY: e.clientY, originX: node.x, originY: node.y };
     setSelectedId(node.id);
-
-    // Defer parent selection to avoid setState-in-render combos; parent may also have deferred version.
-    setTimeout(() => onNodeSelect?.(node), 0);
+    onNodeSelect?.(node);
   };
 
   // ---------- canvas pointer down for panning ----------
@@ -436,14 +396,11 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     const wantPan = e.button === 0 || e.button === 1 || spacePressedRef.current;
     if (!wantPan) {
       setSelectedId(null);
-      // defer selection clear
-      setTimeout(() => onNodeSelect?.(null), 0);
+      onNodeSelect?.(null);
       return;
     }
     e.preventDefault();
-    try {
-      containerRef.current.setPointerCapture?.(e.pointerId);
-    } catch (_) {}
+    try { containerRef.current.setPointerCapture?.(e.pointerId); } catch (_) {}
     panningRef.current = { startClientX: e.clientX, startClientY: e.clientY, originTranslate: { ...translate } };
   };
 
@@ -478,7 +435,7 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
       const el = document.activeElement;
       if (!el) return false;
       const tag = el.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return true;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
       if (el.isContentEditable) return true;
       return false;
     };
@@ -523,12 +480,9 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
   function getEdgePath(sourceNode, targetNode) {
     if (!sourceNode || !targetNode) return "";
     const s = getPortWorld(sourceNode, "output"); // right
-    const t = getPortWorld(targetNode, "input"); // left
+    const t = getPortWorld(targetNode, "input");  // left
 
-    let x1 = +s.x,
-      y1 = +s.y,
-      x2 = +t.x,
-      y2 = +t.y;
+    let x1 = +s.x, y1 = +s.y, x2 = +t.x, y2 = +t.y;
     const dx = x2 - x1;
     const dy = y2 - y1;
 
@@ -555,11 +509,7 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     const cp1x = sx + (midX - sx) * 0.5;
     const cp2x = tx - (tx - midX) * 0.5;
 
-    return `M ${toFixedNum(x1)} ${toFixedNum(y1)} L ${toFixedNum(sx)} ${toFixedNum(sy)} C ${toFixedNum(
-      cp1x
-    )} ${toFixedNum(sy)} ${toFixedNum(cp2x)} ${toFixedNum(ty)} ${toFixedNum(tx)} ${toFixedNum(ty)} L ${toFixedNum(
-      x2
-    )} ${toFixedNum(y2)}`;
+    return `M ${toFixedNum(x1)} ${toFixedNum(y1)} L ${toFixedNum(sx)} ${toFixedNum(sy)} C ${toFixedNum(cp1x)} ${toFixedNum(sy)} ${toFixedNum(cp2x)} ${toFixedNum(ty)} ${toFixedNum(tx)} ${toFixedNum(ty)} L ${toFixedNum(x2)} ${toFixedNum(y2)}`;
   }
 
   function getTempPath() {
@@ -567,10 +517,7 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     const src = connectingRef.current.sourcePortWorld;
     const t = connectingTargetWorld;
 
-    let x1 = +src.x,
-      y1 = +src.y,
-      x2 = +t.x,
-      y2 = +t.y;
+    let x1 = +src.x, y1 = +src.y, x2 = +t.x, y2 = +t.y;
     const dx = x2 - x1;
 
     if (Math.abs(dx) < 0.5 && Math.abs(y2 - y1) < 0.5) {
@@ -596,11 +543,7 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     const cp1x = sx + (midX - sx) * 0.5;
     const cp2x = tx - (tx - midX) * 0.5;
 
-    return `M ${toFixedNum(x1)} ${toFixedNum(y1)} L ${toFixedNum(sx)} ${toFixedNum(sy)} C ${toFixedNum(
-      cp1x
-    )} ${toFixedNum(sy)} ${toFixedNum(cp2x)} ${toFixedNum(ty)} ${toFixedNum(tx)} ${toFixedNum(ty)} L ${toFixedNum(
-      x2
-    )} ${toFixedNum(y2)}`;
+    return `M ${toFixedNum(x1)} ${toFixedNum(y1)} L ${toFixedNum(sx)} ${toFixedNum(sy)} C ${toFixedNum(cp1x)} ${toFixedNum(sy)} ${toFixedNum(cp2x)} ${toFixedNum(ty)} ${toFixedNum(tx)} ${toFixedNum(ty)} L ${toFixedNum(x2)} ${toFixedNum(y2)}`;
   }
 
   // ---------- world style ----------
@@ -612,7 +555,8 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
     position: "absolute",
     left: 0,
     top: 0,
-    backgroundImage: `linear-gradient(0deg, rgba(0,0,0,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.04) 1px, transparent 1px)`,
+    backgroundImage:
+      `linear-gradient(0deg, rgba(0,0,0,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.04) 1px, transparent 1px)`,
     backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px, ${GRID_SIZE}px ${GRID_SIZE}px`,
   };
 
@@ -681,7 +625,21 @@ const NodeCanvas = forwardRef(function NodeCanvas({ onNodeSelect, onNodeChange, 
                   <ImageNode
                     node={node}
                     isSelected={isSelected}
-                    onRemove={(id) => removeNodeLocal(id)}
+                    onRemove={(id) => {
+                      // Call parent handler if provided (so server can delete).
+                      // Parent should call nodeCanvasRef.current.removeNode(id) after successful server delete.
+                      if (onNodeRemove) {
+                        onNodeRemove(id);
+                      } else {
+                        // fallback local removal
+                        setNodes(prev => prev.filter(n => n.id !== id));
+                        setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
+                        if (selectedId === id) {
+                          setSelectedId(null);
+                          onNodeSelect?.(null);
+                        }
+                      }
+                    }}
                     onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
                   />
                 </div>

@@ -131,6 +131,46 @@ export default function Page() {
     output_format: panelValues.output?.selected ?? "png",
   };
 
+  // helper to avoid duplicates from finalizeGeneratedImage
+  const finalizeLocksRef = useRef(new Map()); // key -> Promise for in-flight finalize
+
+  async function finalizeOnce(key, finalizeArgs) {
+    if (!key) throw new Error("finalizeOnce requires a key");
+
+    // already handled
+    if (processedPredictionsRef.current.has(key)) {
+      return { alreadyProcessed: true };
+    }
+
+    // in-flight
+    if (finalizeLocksRef.current.has(key)) {
+      try {
+        return await finalizeLocksRef.current.get(key);
+      } catch (err) {
+        finalizeLocksRef.current.delete(key);
+        throw err;
+      }
+    }
+
+    const p = (async () => {
+      // optimistic mark (so other code paths skip immediately)
+      processedPredictionsRef.current.add(key);
+      try {
+        const res = await finalizeGeneratedImage(finalizeArgs);
+        return res;
+      } catch (err) {
+        // rollback optimistic mark so retry can happen later
+        processedPredictionsRef.current.delete(key);
+        throw err;
+      } finally {
+        finalizeLocksRef.current.delete(key);
+      }
+    })();
+
+    finalizeLocksRef.current.set(key, p);
+    return await p;
+  }
+
   // read projectId from querystring once
   useEffect(() => {
     const pid = searchParams?.get("projectId");
@@ -142,8 +182,28 @@ export default function Page() {
     async ({ id = null, image = null, prompt = "", model = "", position = null, width = 260, height = 180 } = {}) => {
       // if id provided and already added, short-circuit
       if (id && addedNodeIdsRef.current.has(id)) return id;
-  
-      // If we have a project, prefer server-first flow:
+
+      // If id provided, assume server row exists -> local-only add (do NOT POST)
+      if (id) {
+        // if NodeCanvas not ready, queue it
+        if (!nodeCanvasRef.current) {
+          setPendingNodeQueue((q) => [...q, { id, image, prompt, model, position, width, height }]);
+          return id;
+        }
+        nodeCanvasRef.current.addImageNode({
+          id,
+          image,
+          prompt,
+          model,
+          position,
+          width,
+          height,
+        });
+        addedNodeIdsRef.current.add(id);
+        return id;
+      }
+
+      // If we have a project and no id, prefer server-first flow:
       if (currentProjectId) {
         try {
           // Build payload for server. If image is a remote URL (external) we'll pass as externalUrl.
@@ -156,25 +216,23 @@ export default function Page() {
             height,
             data: { prompt, model },
           };
-  
+
           const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
           });
-  
+
           if (!res.ok) {
             const text = await res.text().catch(() => "");
             console.warn("Server node create failed:", res.status, text);
             throw new Error("Server node create failed");
           }
-  
+
           const json = await res.json().catch(() => ({}));
           const nodeRow = json?.node ?? null;
           const signedUrl = json?.signedUrl ?? null;
 
-          
-  
           if (!nodeRow || !nodeRow.id) {
             console.warn("Server returned no node id, falling back to local add", json);
             // fallback to local add if server didn't return an id
@@ -182,7 +240,7 @@ export default function Page() {
             if (localId) addedNodeIdsRef.current.add(localId);
             return localId;
           }
-  
+
           // add (idempotent) to canvas using server id and signed url for immediate display
           nodeCanvasRef.current?.addImageNode?.({
             id: nodeRow.id,
@@ -193,7 +251,7 @@ export default function Page() {
             width: nodeRow.width ?? width,
             height: nodeRow.height ?? height,
           });
-  
+
           addedNodeIdsRef.current.add(nodeRow.id);
           return nodeRow.id;
         } catch (err) {
@@ -201,14 +259,14 @@ export default function Page() {
           // fallback local
         }
       }
-  
+
       // If no project or server flow failed — local add (same as before)
       if (!nodeCanvasRef.current) {
         // queue if not ready
         setPendingNodeQueue((q) => [...q, { id, image, prompt, model, position, width, height }]);
         return null;
       }
-  
+
       // final local add
       const newId = nodeCanvasRef.current.addImageNode({
         id,
@@ -227,157 +285,157 @@ export default function Page() {
   );
 
   // Hydrate project nodes & edges when projectId changes (drop-in replacement)
-useEffect(() => {
-  if (!currentProjectId) return;
-  let mounted = true;
+  useEffect(() => {
+    if (!currentProjectId) return;
+    let mounted = true;
 
-  // small helper: wait for nodeCanvasRef.current to become available
-  async function waitForCanvasReady(timeoutMs = 3000, intervalMs = 50) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (nodeCanvasRef.current && typeof nodeCanvasRef.current.addImageNode === "function" && typeof nodeCanvasRef.current.getNodes === "function") {
-        return true;
-      }
-      await new Promise((r) => setTimeout(r, intervalMs));
-    }
-    return !!(nodeCanvasRef.current && typeof nodeCanvasRef.current.addImageNode === "function");
-  }
-
-  async function loadProject() {
-    const ready = await waitForCanvasReady();
-    if (!mounted) return;
-
-    // clear canvas and dedupe set
-    if (nodeCanvasRef.current?.clear) nodeCanvasRef.current.clear();
-    addedNodeIdsRef.current.clear();
-
-    // fetch nodes via supabase client (RLS enforced)
-    const { data: nodesData = [], error: nodesErr } = await supabase
-      .from("nodes")
-      .select("id, x, y, width, height, data")
-      .eq("project_id", currentProjectId);
-
-    if (nodesErr) {
-      console.error("loadProject nodes fetch failed", nodesErr);
-      return;
-    }
-
-    // collect storage paths to request signed urls in one call
-    const storagePaths = Array.from(
-      new Set(
-        (nodesData || [])
-          .map((r) => r?.data?.image)
-          .filter(Boolean)
-          .filter((p) => !/^https?:\/\//i.test(p) && !p.includes("/storage/v1/object/sign/"))
-      )
-    );
-
-    let signedUrlsMap = {};
-    if (storagePaths.length > 0) {
-      try {
-        const r = await fetch("/api/getSignedUrl", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ paths: storagePaths }),
-        });
-        if (r.ok) {
-          const j = await r.json();
-          signedUrlsMap = j.signedUrls ?? {};
-        } else {
-          console.warn("getSignedUrl failed", await r.text());
+    // small helper: wait for nodeCanvasRef.current to become available
+    async function waitForCanvasReady(timeoutMs = 3000, intervalMs = 50) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (nodeCanvasRef.current && typeof nodeCanvasRef.current.addImageNode === "function" && typeof nodeCanvasRef.current.getNodes === "function") {
+          return true;
         }
-      } catch (err) {
-        console.warn("getSignedUrl request error", err);
+        await new Promise((r) => setTimeout(r, intervalMs));
       }
+      return !!(nodeCanvasRef.current && typeof nodeCanvasRef.current.addImageNode === "function");
     }
-    
-    // Add nodes deterministically
-    for (const nodeRow of nodesData) {
+
+    async function loadProject() {
+      const ready = await waitForCanvasReady();
       if (!mounted) return;
-    
-      const rawImageVal = nodeRow?.data?.image;
-      let displayImage = null;
-    
-      // If data.image is an absolute URL — use it directly.
-      if (rawImageVal && /^https?:\/\//i.test(rawImageVal)) {
-        displayImage = rawImageVal;
-      } else if (rawImageVal) {
-        // It's likely a storage path -> look up signed URL from the map.
-        displayImage = signedUrlsMap[rawImageVal] ?? null;
-    
-        // If we didn't get a signed URL (null), try a single-path retry (helps if the initial batch failed).
-        if (!displayImage) {
-          try {
-            const rr = await fetch("/api/getSignedUrl", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ paths: [rawImageVal] }),
-            });
-            if (rr.ok) {
-              const jj = await rr.json();
-              displayImage = jj.signedUrls?.[rawImageVal] ?? null;
+
+      // clear canvas and dedupe set
+      if (nodeCanvasRef.current?.clear) nodeCanvasRef.current.clear();
+      addedNodeIdsRef.current.clear();
+
+      // fetch nodes via supabase client (RLS enforced)
+      const { data: nodesData = [], error: nodesErr } = await supabase
+        .from("nodes")
+        .select("id, x, y, width, height, data")
+        .eq("project_id", currentProjectId);
+
+      if (nodesErr) {
+        console.error("loadProject nodes fetch failed", nodesErr);
+        return;
+      }
+
+      // collect storage paths to request signed urls in one call
+      const storagePaths = Array.from(
+        new Set(
+          (nodesData || [])
+            .map((r) => r?.data?.image)
+            .filter(Boolean)
+            .filter((p) => !/^https?:\/\//i.test(p) && !p.includes("/storage/v1/object/sign/"))
+        )
+      );
+
+      let signedUrlsMap = {};
+      if (storagePaths.length > 0) {
+        try {
+          const r = await fetch("/api/getSignedUrl", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paths: storagePaths }),
+          });
+          if (r.ok) {
+            const j = await r.json();
+            signedUrlsMap = j.signedUrls ?? {};
+          } else {
+            console.warn("getSignedUrl failed", await r.text());
+          }
+        } catch (err) {
+          console.warn("getSignedUrl request error", err);
+        }
+      }
+
+      // Add nodes deterministically
+      for (const nodeRow of nodesData) {
+        if (!mounted) return;
+
+        const rawImageVal = nodeRow?.data?.image;
+        let displayImage = null;
+
+        // If data.image is an absolute URL — use it directly.
+        if (rawImageVal && /^https?:\/\//i.test(rawImageVal)) {
+          displayImage = rawImageVal;
+        } else if (rawImageVal) {
+          // It's likely a storage path -> look up signed URL from the map.
+          displayImage = signedUrlsMap[rawImageVal] ?? null;
+
+          // If we didn't get a signed URL (null), try a single-path retry (helps if the initial batch failed).
+          if (!displayImage) {
+            try {
+              const rr = await fetch("/api/getSignedUrl", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ paths: [rawImageVal] }),
+              });
+              if (rr.ok) {
+                const jj = await rr.json();
+                displayImage = jj.signedUrls?.[rawImageVal] ?? null;
+              }
+            } catch (e) {
+              // ignore retry failure
             }
-          } catch (e) {
-            // ignore retry failure
           }
         }
-      }
-    
-      // If already added (dedupe), skip
-      if (addedNodeIdsRef.current.has(nodeRow.id)) continue;
-    
-      try {
-        nodeCanvasRef.current.addImageNode({
-          id: nodeRow.id,
-          image: displayImage, // either signed url, external url, or null (empty node)
-          prompt: nodeRow.data?.prompt ?? "",
-          model: nodeRow.data?.model ?? "",
-          position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
-          width: nodeRow.width ?? 260,
-          height: nodeRow.height ?? 180,
-        });
-        addedNodeIdsRef.current.add(nodeRow.id);
-      } catch (err) {
-        console.warn("Failed to add node to canvas during hydration", nodeRow.id, err);
-      }
-    }
 
-    // Load edges
-    const { data: edgesData = [], error: edgesErr } = await supabase
-      .from("edges")
-      .select("id, source_node, target_node")
-      .eq("project_id", currentProjectId);
+        // If already added (dedupe), skip
+        if (addedNodeIdsRef.current.has(nodeRow.id)) continue;
 
-    if (edgesErr) {
-      console.warn("Failed to fetch edges", edgesErr);
-    } else {
-      // add edges if both endpoints present
-      const existingNodes = new Set((nodeCanvasRef.current?.getNodes?.() || []).map(n => n.id));
-      const existingEdges = new Set((nodeCanvasRef.current?.getEdges?.() || []).map(e => `${e.sourceId}__${e.targetId}`));
-      for (const eRow of edgesData) {
-        if (!mounted) return;
-        const key = `${eRow.source_node}__${eRow.target_node}`;
-        if (existingEdges.has(key)) continue;
-        if (!existingNodes.has(eRow.source_node) || !existingNodes.has(eRow.target_node)) {
-          console.warn("Skipping edge because node(s) missing", eRow);
-          continue;
+        try {
+          nodeCanvasRef.current.addImageNode({
+            id: nodeRow.id,
+            image: displayImage, // either signed url, external url, or null (empty node)
+            prompt: nodeRow.data?.prompt ?? "",
+            model: nodeRow.data?.model ?? "",
+            position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
+            width: nodeRow.width ?? 260,
+            height: nodeRow.height ?? 180,
+          });
+          addedNodeIdsRef.current.add(nodeRow.id);
+        } catch (err) {
+          console.warn("Failed to add node to canvas during hydration", nodeRow.id, err);
         }
-        nodeCanvasRef.current.addEdge?.({ sourceId: eRow.source_node, targetId: eRow.target_node });
+      }
+
+      // Load edges
+      const { data: edgesData = [], error: edgesErr } = await supabase
+        .from("edges")
+        .select("id, source_node, target_node")
+        .eq("project_id", currentProjectId);
+
+      if (edgesErr) {
+        console.warn("Failed to fetch edges", edgesErr);
+      } else {
+        // add edges if both endpoints present
+        const existingNodes = new Set((nodeCanvasRef.current?.getNodes?.() || []).map((n) => n.id));
+        const existingEdges = new Set((nodeCanvasRef.current?.getEdges?.() || []).map((e) => `${e.sourceId}__${e.targetId}`));
+        for (const eRow of edgesData) {
+          if (!mounted) return;
+          const key = `${eRow.source_node}__${eRow.target_node}`;
+          if (existingEdges.has(key)) continue;
+          if (!existingNodes.has(eRow.source_node) || !existingNodes.has(eRow.target_node)) {
+            console.warn("Skipping edge because node(s) missing", eRow);
+            continue;
+          }
+          nodeCanvasRef.current.addEdge?.({ sourceId: eRow.source_node, targetId: eRow.target_node });
+        }
       }
     }
-  }
 
-  loadProject();
-  return () => { mounted = false; };
-}, [currentProjectId]);
+    loadProject();
+    return () => { mounted = false; };
+  }, [currentProjectId]);
 
   // ===== Node queue flush (when NodeCanvas becomes ready) =====
   useEffect(() => {
     if (!nodeCanvasRef.current) return;
     if (!pendingNodeQueue || pendingNodeQueue.length === 0) return;
-  
+
     let cancelled = false;
-  
+
     (async () => {
       for (const item of pendingNodeQueue) {
         if (cancelled) break;
@@ -390,7 +448,7 @@ useEffect(() => {
       }
       if (!cancelled) setPendingNodeQueue([]);
     })();
-  
+
     return () => { cancelled = true; };
   }, [pendingNodeQueue, addNodeToCanvas]);
 
@@ -464,7 +522,10 @@ useEffect(() => {
 
         try {
           if (nodeCanvasRef.current?.removeNode) {
+            // Call the canvas remove API (local)
             nodeCanvasRef.current.removeNode(selectedNode.id);
+            // inform server about removal
+            handleNodeRemove?.(selectedNode.id);
           } else {
             console.warn("NodeCanvas.removeNode not available");
           }
@@ -479,12 +540,12 @@ useEffect(() => {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedNode]);
+  }, [selectedNode]); // handleNodeRemove is defined below
 
   // ===== File handlers =====
   const handleFilesAdded = (pickedFiles) => {
     const items = pickedFiles.map((file, i) => {
-      const id = crypto.randomUUID();
+      const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}${Math.random().toString(36).slice(2,8)}`;
       const previewUrl = URL.createObjectURL(file);
       return { id, file, previewUrl, name: file.name, size: file.size, status: "ready" };
     });
@@ -581,7 +642,8 @@ useEffect(() => {
   function startPolling(id) {
     if (!id) return;
     // If we've already processed this prediction id, don't start another poll
-    if (processedPredictionsRef.current.has(id)) {
+    const procKeyCheck = `pred:${id}`;
+    if (processedPredictionsRef.current.has(procKeyCheck)) {
       console.debug("startPolling: prediction already processed", id);
       return;
     }
@@ -633,99 +695,107 @@ useEffect(() => {
             currentTargetRef.current = null;
             setGenerating(false);
             setMode("edit");
-          } else {
-            // optimistic mark
-            processedPredictionsRef.current.add(procKey);
-        
-            try {
-              // finalization logic (same as before)
-              const outFinal = pred.output || pred.result || pred.images;
-              if (outFinal) {
-                const arr = typeof outFinal === "string" ? [outFinal] : Array.isArray(outFinal) ? outFinal.flat() : [];
-                setImages(arr);
-        
-                const last = arr[arr.length - 1];
-                if (last) {
-                  const externalUrl = last;
-                  const projectId = currentProjectId ?? null;
-                  const positionForNewNode = selectedNode
-                    ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) }
-                    : { x: 120, y: 120 };
-        
-                  if (projectId) {
-                    try {
-                      const result = await finalizeGeneratedImage({
-                        externalUrl,
-                        projectId,
-                        position: positionForNewNode,
+            return;
+          }
+
+          // Build finalization args & use finalizeOnce to dedupe across code paths
+          try {
+            const outFinal = pred.output || pred.result || pred.images;
+            if (outFinal) {
+              const arr = typeof outFinal === "string" ? [outFinal] : Array.isArray(outFinal) ? outFinal.flat() : [];
+              setImages(arr);
+
+              const last = arr[arr.length - 1];
+              if (last) {
+                const externalUrl = last;
+                const projectId = currentProjectId ?? null;
+                const positionForNewNode = selectedNode
+                  ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) }
+                  : { x: 120, y: 120 };
+
+                if (projectId) {
+                  const procKeyForFinalize = `pred:${id}`;
+                  try {
+                    const res = await finalizeOnce(procKeyForFinalize, {
+                      externalUrl,
+                      projectId,
+                      position: positionForNewNode,
+                      prompt: latestGenerationPromptRef.current || "",
+                      model: panelValues.model?.selected,
+                      sourceNodeId: mode === "edit" ? selectedNode?.id : null,
+                      nodeCanvasRef,
+                    });
+
+                    // res might be { alreadyProcessed: true } or server result
+                    const nodeRow = res?.node;
+                    const signedUrl = res?.signedUrl ?? externalUrl;
+                    if (nodeRow) {
+                      addNodeToCanvas({
+                        id: nodeRow.id,
+                        image: signedUrl,
+                        prompt: nodeRow.data?.prompt ?? latestGenerationPromptRef.current ?? "",
+                        model: nodeRow.data?.model ?? panelValues.model?.selected,
+                        position: { x: nodeRow.x ?? positionForNewNode.x, y: nodeRow.y ?? positionForNewNode.y },
+                        width: nodeRow.width ?? 260,
+                        height: nodeRow.height ?? 180,
+                      });
+
+                      if (res?.edge) {
+                        const edge = res.edge;
+                        const src = edge.source_node ?? edge.sourceId ?? edge.source;
+                        const tgt = edge.target_node ?? edge.targetId ?? edge.target;
+                        nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
+                      }
+                    } else if (res?.alreadyProcessed) {
+                      // already handled elsewhere — no-op
+                    } else {
+                      // fallback local add if server didn't return node
+                      enqueueOrAddImageNode({ imageUrl: signedUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                    }
+
+                    latestGenerationPromptRef.current = "";
+                  } catch (err) {
+                    // finalizeOnce will rollback its optimistic mark on error
+                    console.warn("Server finalize failed in poller, falling back to local add:", err);
+                    if (mode === "edit" && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
+                      const newId = nodeCanvasRef.current.addImageNode({
+                        image: externalUrl,
                         prompt: latestGenerationPromptRef.current || "",
                         model: panelValues.model?.selected,
-                        sourceNodeId: mode === "edit" ? selectedNode?.id : null,
-                        nodeCanvasRef,
+                        position: positionForNewNode,
                       });
-        
-                      const nodeRow = result?.node;
-                      const signedUrl = result?.signedUrl ?? externalUrl;
-                      if (nodeRow) {
-                        addNodeToCanvas({
-                          id: nodeRow.id,
-                          image: signedUrl,
-                          prompt: nodeRow.data?.prompt ?? latestGenerationPromptRef.current ?? "",
-                          model: nodeRow.data?.model ?? panelValues.model?.selected,
-                          position: { x: nodeRow.x ?? positionForNewNode.x, y: nodeRow.y ?? positionForNewNode.y },
-                          width: nodeRow.width ?? 260,
-                          height: nodeRow.height ?? 180,
-                        });
-        
-                        if (result?.edge) {
-                          const edge = result.edge;
-                          const src = edge.source_node ?? edge.sourceId ?? edge.source;
-                          const tgt = edge.target_node ?? edge.targetId ?? edge.target;
-                          nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
-                        }
-                      } else {
-                        enqueueOrAddImageNode({ imageUrl: signedUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                      if (newId && nodeCanvasRef.current?.addEdge && mode === "edit" && selectedNode?.id) {
+                        nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newId });
                       }
-        
-                      latestGenerationPromptRef.current = "";
-                    } catch (err) {
-                      // If finalize fails, remove optimistic mark so a retry can occur
-                      processedPredictionsRef.current.delete(procKey);
-                      console.warn("Server finalize failed in poller, falling back to local add:", err);
-                      if (mode === "edit" && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
-                        const newId = nodeCanvasRef.current.addImageNode({
-                          image: externalUrl,
-                          prompt: latestGenerationPromptRef.current || "",
-                          model: panelValues.model?.selected,
-                          position: positionForNewNode,
-                        });
-                        if (newId && nodeCanvasRef.current?.addEdge && mode === "edit" && selectedNode?.id) {
-                          nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newId });
-                        }
-                      } else {
-                        enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
-                      }
-                      latestGenerationPromptRef.current = "";
+                    } else {
+                      enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
                     }
-                  } else {
-                    enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
                     latestGenerationPromptRef.current = "";
                   }
+                } else {
+                  enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                  latestGenerationPromptRef.current = "";
                 }
               }
-        
-              if (pollRef.current) {
-                clearInterval(pollRef.current);
-                pollRef.current = null;
-              }
-              currentTargetRef.current = null;
-              setGenerating(false);
-              setMode("edit");
-            } catch (err) {
-              // in case of unexpected errors, remove optimistic mark
-              processedPredictionsRef.current.delete(procKey);
-              throw err; // let outer catch handle logging/state
             }
+
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+            currentTargetRef.current = null;
+            setGenerating(false);
+            setMode("edit");
+          } catch (err) {
+            // in case of unexpected errors, ensure state is consistent
+            console.error("Error during poll finalize flow", err);
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+            currentTargetRef.current = null;
+            setGenerating(false);
+            setMode("create");
           }
         } else if (pred.status === "failed") {
           if (pollRef.current) {
@@ -808,10 +878,8 @@ useEffect(() => {
             if (processedPredictionsRef.current.has(procKey)) {
               // already handled by another path — no-op
             } else if (currentProjectId) {
-              // optimistic mark
-              processedPredictionsRef.current.add(procKey);
               try {
-                const res = await finalizeGeneratedImage({
+                const res = await finalizeOnce(procKey, {
                   externalUrl,
                   projectId: currentProjectId,
                   position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
@@ -820,7 +888,7 @@ useEffect(() => {
                   sourceNodeId: mode === "edit" ? selectedNode?.id : null,
                   nodeCanvasRef,
                 });
-      
+
                 if (res?.node) {
                   const nodeRow = res.node;
                   const signedUrl = res.signedUrl ?? externalUrl;
@@ -839,12 +907,13 @@ useEffect(() => {
                     const tgt = edge.target_node ?? edge.targetId ?? edge.target;
                     nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
                   }
+                } else if (res?.alreadyProcessed) {
+                  // already processed — no-op
                 } else {
                   enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: currentPrompt, modelName: panelValues.model?.selected });
                 }
               } catch (err) {
-                // rollback optimistic mark so a retry can happen later
-                processedPredictionsRef.current.delete(procKey);
+                // rollback optimistic mark handled inside finalizeOnce on error
                 console.warn("Finalize failed (rawPrediction path)", err);
                 enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: currentPrompt, modelName: panelValues.model?.selected });
               }
@@ -853,7 +922,7 @@ useEffect(() => {
             }
           }
         }
-      
+
         setGenerating(false);
         setMode("edit");
         currentTargetRef.current = null;
@@ -876,13 +945,11 @@ useEffect(() => {
         if (first.status === "succeeded") {
           const procKey = `pred:${id}`;
           if (!processedPredictionsRef.current.has(procKey)) {
-            // optimistic mark to avoid races with poller or other handlers
-            processedPredictionsRef.current.add(procKey);
             const last = arr[arr.length - 1];
             if (last) {
               if (currentProjectId) {
                 try {
-                  const res = await finalizeGeneratedImage({
+                  const res = await finalizeOnce(procKey, {
                     externalUrl: last,
                     projectId: currentProjectId,
                     position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
@@ -891,7 +958,7 @@ useEffect(() => {
                     sourceNodeId: mode === "edit" ? selectedNode?.id : null,
                     nodeCanvasRef,
                   });
-        
+
                   if (res?.node) {
                     addNodeToCanvas({
                       id: res.node.id,
@@ -908,12 +975,12 @@ useEffect(() => {
                       const tgt = edge.target_node ?? edge.targetId ?? edge.target;
                       nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
                     }
+                  } else if (res?.alreadyProcessed) {
+                    // already processed — no-op
                   } else {
                     enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
                   }
                 } catch (err) {
-                  // rollback processed mark so retry is possible
-                  processedPredictionsRef.current.delete(procKey);
                   console.warn("Finalize failed (immediate success)", err);
                   enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
                 }
@@ -1033,7 +1100,7 @@ useEffect(() => {
       console.warn("Failed to persist node change", err);
     }
   }, [currentProjectId]);
-  
+
   const handleEdgeCreate = useCallback(async (edge) => {
     if (!currentProjectId || !edge) return;
     try {
@@ -1047,17 +1114,65 @@ useEffect(() => {
       console.warn("Failed to persist edge", err);
     }
   }, [currentProjectId]);
-  
+
+  // server-side delete + remove from canvas on success
   const handleNodeRemove = useCallback(async (nodeId) => {
     if (!currentProjectId || !nodeId) return;
     try {
-      await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
+      const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
+      if (!res.ok) {
+        console.warn("Failed to delete node on server", await res.text());
+        return;
+      }
       addedNodeIdsRef.current.delete(nodeId);
+      // remove from canvas after server confirms
+      try {
+        nodeCanvasRef.current?.removeNode?.(nodeId);
+      } catch (e) {
+        // fallback: clear state in page if needed
+        console.warn("removeNode on canvas failed", e);
+      }
     } catch (err) {
       console.warn("Failed to delete node on server", err);
     }
   }, [currentProjectId]);
-  
+
+  // make the above handleNodeRemove available to the module scope (used by keydown handler)
+  // (note: we also used a local reference earlier in a useEffect, so bind it)
+  // (React hook rules: handleNodeRemove is a stable useCallback)
+
+  // Apply aspect-ratio changes to the selected node when user changes the ratio panel.
+  useEffect(() => {
+    const ratio = panelValues.ratio?.selected;
+    if (!ratio) return;
+    if (!selectedNode?.id) return;
+    // parse ratio 'W:H'
+    const parts = ratio.split(":").map((p) => Number(p));
+    if (parts.length !== 2 || parts.some(isNaN)) return;
+    const [wR, hR] = parts;
+    if (wR <= 0 || hR <= 0) return;
+
+    // base width (prefer existing width)
+    const baseWidth = Math.max(80, selectedNode.width || 260);
+    const newWidth = Math.round(Math.max(80, baseWidth));
+    const newHeight = Math.round(Math.max(80, (baseWidth * (hR / wR))));
+
+    // update node visually and persist
+    try {
+      nodeCanvasRef.current?.updateNode?.(selectedNode.id, { width: newWidth, height: newHeight });
+      // fetch updated node and persist
+      const updated = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === selectedNode.id) ?? null;
+      if (updated) {
+        // update backend
+        handleNodeChange(updated);
+        // update selected state
+        setSelectedNode(updated);
+      }
+    } catch (err) {
+      console.warn("Failed to update node size for ratio change", err);
+    }
+  }, [panelValues.ratio?.selected, selectedNode?.id, handleNodeChange]);
+
   // Render
   return (
     <ProtectedRoute>
@@ -1078,11 +1193,12 @@ useEffect(() => {
                   </button>
                 </div>
 
-                <NodeCanvas ref={nodeCanvasRef}
-                onNodeSelect={handleNodeSelect}
-                onNodeChange={handleNodeChange}
-                onEdgeCreate={handleEdgeCreate}
-                onNodeRemove={handleNodeRemove} 
+                <NodeCanvas
+                  ref={nodeCanvasRef}
+                  onNodeSelect={handleNodeSelect}
+                  onNodeChange={handleNodeChange}
+                  onEdgeCreate={handleEdgeCreate}
+                  onNodeRemove={handleNodeRemove}
                 />
               </div>
             </div>
