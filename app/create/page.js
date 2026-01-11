@@ -35,6 +35,16 @@ export default function Page() {
   const [referenceUrls, setReferenceUrls] = useState([]);
   const pollRef = useRef(null);
 
+  const creatingEdgesRef = useRef(new Set()); // keys currently being POSTed
+  const createdEdgesRef = useRef(new Set());  // keys we've already created successfully
+
+  const suppressNodeChangeRef = useRef(false); // when true, handleNodeChange will ignore events
+  const nodeStoragePathRef = useRef(new Map()); // nodeId -> canonical storage path (e.g. projects/<id>/images/...)
+  const looksLikeAbsoluteUrl = (s) => typeof s === "string" && /^https?:\/\//i.test(s);
+  const looksLikeSignedUrl = (s) => typeof s === "string" && s.includes("/storage/v1/object/sign/");
+  const canonicalStorageRegex = /^(?:\/)?projects\/[0-9a-fA-F-]{36}\/images\/.+$/i;
+  const normalizeStoragePath = (p) => (typeof p === "string" ? (p.startsWith("/") ? p.slice(1) : p) : p);
+
   const searchParams = useSearchParams();
   const [currentProjectId, setCurrentProjectId] = useState(null);
 
@@ -57,6 +67,16 @@ export default function Page() {
 
   // dedupe set of canvas node ids already added (prevents duplicate adds on hydration/finalize)
   const addedNodeIdsRef = useRef(new Set());
+
+  const isUuid = (id) => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+   // Clear per-project caches when project changes
+   useEffect(() => {
+    creatingEdgesRef.current.clear();
+    createdEdgesRef.current.clear();
+  }, [currentProjectId]);
+
+  const edgeKey = (src, tgt) => `${src}__${tgt}`;
 
   // files + uploads
   const [files, setFiles] = useState([]);
@@ -130,6 +150,22 @@ export default function Page() {
     quality: panelValues.quality?.level ?? "medium",
     output_format: panelValues.output?.selected ?? "png",
   };
+
+  // safe update helper: suppress onNodeChange while programmatically updating
+  function safeUpdateNode(nodeId, patch) {
+    try {
+      suppressNodeChangeRef.current = true;
+      nodeCanvasRef.current?.updateNode?.(nodeId, patch);
+    } catch (e) {
+      console.warn("safeUpdateNode failed", e);
+    } finally {
+      // let any synchronous onNodeChange handlers run and ignore them
+      // clear suppression on next tick to allow user interactions to flow normally
+      setTimeout(() => {
+        suppressNodeChangeRef.current = false;
+      }, 0);
+    }
+  }
 
   // helper to avoid duplicates from finalizeGeneratedImage
   const finalizeLocksRef = useRef(new Map()); // key -> Promise for in-flight finalize
@@ -671,7 +707,7 @@ export default function Page() {
             const targetIdForPreview = currentTargetRef.current ?? (mode !== "edit" ? selectedNode?.id : null);
             if (targetIdForPreview && nodeCanvasRef.current?.updateNode) {
               try {
-                nodeCanvasRef.current.updateNode(targetIdForPreview, {
+                safeUpdateNode(targetIdForPreview, {
                   data: { image: arr[arr.length - 1], status: pred.status === "succeeded" ? "done" : "processing", prompt: latestGenerationPromptRef.current || "" },
                 });
                 const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetIdForPreview) ?? null;
@@ -727,15 +763,21 @@ export default function Page() {
                     });
 
                     // res might be { alreadyProcessed: true } or server result
-                    const nodeRow = res?.node;
                     const signedUrl = res?.signedUrl ?? externalUrl;
-                    if (nodeRow) {
+                    if (res?.node) {
+                      const nodeRow = res.node;
+                      const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
+                      if (canonical) {
+                        const normalized = normalizeStoragePath(canonical);
+                        nodeStoragePathRef.current.set(nodeRow.id, normalized);
+                      }
+                    
                       addNodeToCanvas({
                         id: nodeRow.id,
-                        image: signedUrl,
-                        prompt: nodeRow.data?.prompt ?? latestGenerationPromptRef.current ?? "",
-                        model: nodeRow.data?.model ?? panelValues.model?.selected,
-                        position: { x: nodeRow.x ?? positionForNewNode.x, y: nodeRow.y ?? positionForNewNode.y },
+                        image: res.signedUrl ?? (canonical ? /* construct signed url later by hydration */ null : null),
+                        prompt: nodeRow.data?.prompt ?? "",
+                        model: nodeRow.data?.model ?? "",
+                        position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
                         width: nodeRow.width ?? 260,
                         height: nodeRow.height ?? 180,
                       });
@@ -846,9 +888,7 @@ export default function Page() {
     if (targetNodeId && nodeCanvasRef.current?.updateNode) {
       try {
         currentTargetRef.current = targetNodeId;
-        nodeCanvasRef.current.updateNode(targetNodeId, {
-          data: { status: "generating", prompt: currentPrompt, model: panelValues.model?.selected },
-        });
+        safeUpdateNode(targetNodeId, { data: { status: "generating", prompt: currentPrompt, model: panelValues.model?.selected } });
         const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetNodeId) ?? null;
         if (updated) setSelectedNode(updated);
       } catch (e) {
@@ -891,12 +931,16 @@ export default function Page() {
 
                 if (res?.node) {
                   const nodeRow = res.node;
-                  const signedUrl = res.signedUrl ?? externalUrl;
+                  const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
+                  if (canonical) {
+                    const normalized = normalizeStoragePath(canonical);
+                    nodeStoragePathRef.current.set(nodeRow.id, normalized);
+                  }
                   addNodeToCanvas({
                     id: nodeRow.id,
-                    image: signedUrl,
-                    prompt: nodeRow.data?.prompt ?? currentPrompt,
-                    model: nodeRow.data?.model ?? panelValues.model?.selected,
+                    image: res.signedUrl ?? (canonical ? /* construct signed url later by hydration */ null : null),
+                    prompt: nodeRow.data?.prompt ?? "",
+                    model: nodeRow.data?.model ?? "",
                     position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
                     width: nodeRow.width ?? 260,
                     height: nodeRow.height ?? 180,
@@ -1082,9 +1126,36 @@ export default function Page() {
   }, []);
 
   const handleNodeChange = useCallback(async (node) => {
-    // persist node position/data to server if we have a project
+    // Ignore programmatic updates that we suppressed
+    if (suppressNodeChangeRef.current) return;
+  
     if (!currentProjectId || !node?.id) return;
+    // only persist server ids (uuid). you already have an isUuid helper; keep that logic.
+    if (!isUuid(node.id)) return;
+  
     try {
+      // copy data so we can sanitize
+      const dataToPersist = { ...(node.data || {}) };
+  
+      // If we have canonical path recorded for this node, enforce it
+      const canonical = nodeStoragePathRef.current.get(node.id);
+      if (canonical) {
+        dataToPersist.image = canonical;
+      } else {
+        // If image is an absolute URL or signed URL, *do not persist it*
+        if (typeof dataToPersist.image === "string") {
+          if (looksLikeAbsoluteUrl(dataToPersist.image) || looksLikeSignedUrl(dataToPersist.image)) {
+            delete dataToPersist.image;
+          } else if (canonicalStorageRegex.test(dataToPersist.image)) {
+            // normalize to remove leading slash
+            dataToPersist.image = normalizeStoragePath(dataToPersist.image);
+          } else {
+            // unknown format -> be conservative and do not persist
+            delete dataToPersist.image;
+          }
+        }
+      }
+  
       await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes/${encodeURIComponent(node.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1093,7 +1164,7 @@ export default function Page() {
           y: Math.round(node.y),
           width: node.width,
           height: node.height,
-          data: node.data,
+          data: dataToPersist,
         }),
       });
     } catch (err) {
@@ -1102,16 +1173,80 @@ export default function Page() {
   }, [currentProjectId]);
 
   const handleEdgeCreate = useCallback(async (edge) => {
+    // Basic guard
     if (!currentProjectId || !edge) return;
+
+    const { sourceId, targetId } = edge;
+    if (!sourceId || !targetId) return;
+
+    // If either id is not a server uuid yet, skip creating on server.
+    // NodeCanvas should emit again later once nodes have server ids.
+    if (!isUuid(sourceId) || !isUuid(targetId)) {
+      console.debug("Skipping server edge create until both node IDs are server UUIDs", edge);
+      return;
+    }
+
+    const key = edgeKey(sourceId, targetId);
+
+    // If we've already created this edge on this client, skip.
+    if (createdEdgesRef.current.has(key)) {
+      console.debug("Edge already created (client cache) — skipping:", key);
+      return;
+    }
+
+    // If an in-flight request is already creating this edge, skip to avoid duplicate posts.
+    if (creatingEdgesRef.current.has(key)) {
+      console.debug("Edge creation already in-flight — skipping duplicate:", key);
+      return;
+    }
+
+    // Quick check against NodeCanvas existing edges to avoid posting duplicates
     try {
-      // server expects source_node and target_node
-      await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
+      const existingEdges = new Set((nodeCanvasRef.current?.getEdges?.() || []).map(e => `${e.sourceId}__${e.targetId}`));
+      if (existingEdges.has(key)) {
+        // Mark as created so we don't attempt to post later
+        createdEdgesRef.current.add(key);
+        console.debug("Edge already present in canvas, marking created and skipping server create:", key);
+        return;
+      }
+    } catch (err) {
+      // ignore if getEdges isn't available
+    }
+
+    creatingEdgesRef.current.add(key);
+
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceNode: edge.sourceId, targetNode: edge.targetId }),
+        body: JSON.stringify({ sourceNode: sourceId, targetNode: targetId }),
       });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        console.warn("Failed to persist edge", res.status, txt);
+        // don't add to createdEdgesRef so we can retry later (or let user try again)
+        return;
+      }
+
+      const json = await res.json().catch(() => ({}));
+      // server returned created edge — mark as created and ensure canvas has it
+      createdEdgesRef.current.add(key);
+
+      // Optionally, add the server edge data to canvas if needed (avoid duplicates)
+      try {
+        const canvasEdges = nodeCanvasRef.current?.getEdges?.() || [];
+        const already = canvasEdges.some(e => (e.sourceId === sourceId && e.targetId === targetId));
+        if (!already && nodeCanvasRef.current?.addEdge) {
+          nodeCanvasRef.current.addEdge({ sourceId, targetId });
+        }
+      } catch (err) {
+        console.warn("Failed to add edge to local canvas after server create", err);
+      }
     } catch (err) {
       console.warn("Failed to persist edge", err);
+    } finally {
+      creatingEdgesRef.current.delete(key);
     }
   }, [currentProjectId]);
 
