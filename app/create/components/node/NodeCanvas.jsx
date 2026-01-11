@@ -416,7 +416,7 @@ const NodeCanvas = forwardRef(function NodeCanvas(
       const clientY = e.clientY;
       const worldBefore = clientToWorld({ clientX, clientY });
       const delta = -e.deltaY;
-      const factor = Math.exp(delta * 0.0086);
+      const factor = Math.exp(delta * 0.017);
       const newScale = clamp(scale * factor, MIN_SCALE, MAX_SCALE);
       setScale(newScale);
       const cx = clientX - rect.left;

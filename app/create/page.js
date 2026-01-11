@@ -535,8 +535,25 @@ export default function Page() {
     addNodeToCanvas({ image: imageUrl, prompt: promptText, model: modelName });
   }
 
-  function addEmptyNode({ position = null, width = 260, height = 180 } = {}) {
-    addNodeToCanvas({ image: null, prompt: "", model: "", position, width, height });
+  function addEmptyNode({ position = null, width = null, height = null } = {}) {
+    // If caller didn't provide width/height, derive from the current ratio panel.
+    let w = width;
+    let h = height;
+  
+    const ratio = panelValues.ratio?.selected ?? "9:16";
+    const parts = ratio.split(":").map((p) => Number(p));
+    if ((!w || !h) && parts.length === 2 && !parts.some(isNaN)) {
+      const [wR, hR] = parts;
+      // choose a sensible base width
+      const baseWidth = Math.max(120, w || 260);
+      w = Math.round(baseWidth);
+      h = Math.round(Math.max(80, baseWidth * (hR / wR)));
+    }
+    // fall back defaults if something went wrong
+    if (!w) w = 260;
+    if (!h) h = 180;
+  
+    addNodeToCanvas({ image: null, prompt: "", model: "", position, width: w, height: h });
   }
 
   // keyboard delete/backspace handler — don't run while typing
@@ -1277,36 +1294,59 @@ export default function Page() {
   // (React hook rules: handleNodeRemove is a stable useCallback)
 
   // Apply aspect-ratio changes to the selected node when user changes the ratio panel.
-  useEffect(() => {
-    const ratio = panelValues.ratio?.selected;
-    if (!ratio) return;
-    if (!selectedNode?.id) return;
-    // parse ratio 'W:H'
-    const parts = ratio.split(":").map((p) => Number(p));
-    if (parts.length !== 2 || parts.some(isNaN)) return;
-    const [wR, hR] = parts;
-    if (wR <= 0 || hR <= 0) return;
+  // Apply aspect-ratio changes to the selected node when user changes the ratio panel.
+// LOCK: do NOT change nodes that already have an image.
+useEffect(() => {
+  const ratio = panelValues.ratio?.selected;
+  if (!ratio) return;
+  if (!selectedNode?.id) return;
 
-    // base width (prefer existing width)
-    const baseWidth = Math.max(80, selectedNode.width || 260);
-    const newWidth = Math.round(Math.max(80, baseWidth));
-    const newHeight = Math.round(Math.max(80, (baseWidth * (hR / wR))));
-
-    // update node visually and persist
+  // If node already has an image, do NOT apply ratio changes — aspect is locked.
+  const hasImage = Boolean(selectedNode?.data?.image);
+  if (hasImage) {
+    // optional: ensure data.aspect exists so we know what it was at creation
     try {
-      nodeCanvasRef.current?.updateNode?.(selectedNode.id, { width: newWidth, height: newHeight });
-      // fetch updated node and persist
-      const updated = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === selectedNode.id) ?? null;
-      if (updated) {
-        // update backend
-        handleNodeChange(updated);
-        // update selected state
-        setSelectedNode(updated);
+      const existing = selectedNode?.data ?? {};
+      if (!existing.aspect) {
+        const parts0 = ratio.split(":").map(Number);
+        if (parts0.length === 2 && !parts0.some(isNaN)) {
+          // persist the aspect field (best-effort; handleNodeChange will persist only for server uuid nodes)
+          const updated = { ...selectedNode, data: { ...existing, aspect: ratio } };
+          setSelectedNode(updated);
+          handleNodeChange?.(updated).catch?.(() => {});
+        }
       }
-    } catch (err) {
-      console.warn("Failed to update node size for ratio change", err);
+    } catch (e) {}
+    return;
+  }
+
+  // parse ratio 'W:H'
+  const parts = ratio.split(":").map((p) => Number(p));
+  if (parts.length !== 2 || parts.some(isNaN)) return;
+  const [wR, hR] = parts;
+  if (wR <= 0 || hR <= 0) return;
+
+  // base width (prefer existing width)
+  const baseWidth = Math.max(80, selectedNode.width || 260);
+  const newWidth = Math.round(Math.max(80, baseWidth));
+  const newHeight = Math.round(Math.max(80, (baseWidth * (hR / wR))));
+
+  // update node visually and persist
+  try {
+    nodeCanvasRef.current?.updateNode?.(selectedNode.id, { width: newWidth, height: newHeight });
+
+    // fetch updated node and persist (handleNodeChange itself contains guards for server id)
+    const updated = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === selectedNode.id) ?? null;
+    if (updated) {
+      // Attach the aspect into node.data for future clarity
+      updated.data = { ...(updated.data || {}), aspect: ratio };
+      handleNodeChange(updated);
+      setSelectedNode(updated);
     }
-  }, [panelValues.ratio?.selected, selectedNode?.id, handleNodeChange]);
+  } catch (err) {
+    console.warn("Failed to update node size for ratio change", err);
+  }
+}, [panelValues.ratio?.selected, selectedNode?.id, handleNodeChange]);
 
   // Render
   return (
