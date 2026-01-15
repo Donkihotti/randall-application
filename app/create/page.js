@@ -34,6 +34,7 @@ export default function Page() {
   const [error, setError] = useState(null);
   const [referenceUrls, setReferenceUrls] = useState([]);
   const pollRef = useRef(null);
+  const nodeChangeTimersRef = useRef(new Map());
 
   const creatingEdgesRef = useRef(new Set()); // keys currently being POSTed
   const createdEdgesRef = useRef(new Set());  // keys we've already created successfully
@@ -150,6 +151,22 @@ export default function Page() {
     quality: panelValues.quality?.level ?? "medium",
     output_format: panelValues.output?.selected ?? "png",
   };
+
+  function stopPolling() {
+    if (!pollRef.current) return;
+    try {
+      // If pollRef.current is an AbortController, use abort(); otherwise assume legacy interval id
+      if (typeof pollRef.current.abort === "function") {
+        pollRef.current.abort();
+      } else {
+        clearInterval(pollRef.current);
+      }
+    } catch (e) {
+      // ignore
+    } finally {
+      pollRef.current = null;
+    }
+  }
 
   // safe update helper: suppress onNodeChange while programmatically updating
   function safeUpdateNode(nodeId, patch) {
@@ -620,7 +637,7 @@ export default function Page() {
   // ===== Prediction API helpers =====
   useEffect(() => {
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      stopPolling();
     };
   }, []);
 
@@ -665,219 +682,213 @@ export default function Page() {
     throw new Error(`Create endpoint did not return an id. Response: ${JSON.stringify(data).slice(0, 400)}`);
   }
 
-  async function fetchPrediction(id) {
+  async function fetchPrediction(id, { signal } = {}) {
     if (!id || typeof id !== "string" || id.trim() === "") throw new Error(`fetchPrediction called with invalid id: ${String(id)}`);
-
+  
     const url = `/api/predictions/${encodeURIComponent(id)}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal });
     const contentType = res.headers.get("content-type") || "";
-
+  
     if (!contentType.includes("application/json")) {
       const text = await res.text();
       throw new Error(`Polling non-JSON response (status ${res.status}): ${text.slice(0, 400)}`);
     }
-
+  
     const data = await res.json();
-
+  
     if (!res.ok) {
       const upstreamMsg = data?.error || data?.upstream || data?.raw || JSON.stringify(data);
       throw new Error(`Polling failed: ${upstreamMsg}`);
     }
-
+  
     if (!data || (typeof data === "object" && Object.keys(data).length === 0)) {
       throw new Error("Polling returned empty object — check server logs and upstream response.");
     }
-
+  
     return data;
   }
 
   // ===== Polling loop (keeps pred up to date) =====
   function startPolling(id) {
     if (!id) return;
-    // If we've already processed this prediction id, don't start another poll
     const procKeyCheck = `pred:${id}`;
     if (processedPredictionsRef.current.has(procKeyCheck)) {
       console.debug("startPolling: prediction already processed", id);
       return;
     }
-
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-
-    let sawAnyOutput = false;
-
-    pollRef.current = setInterval(async () => {
+  
+    // Cancel any existing poll
+    stopPolling();
+  
+    const controller = new AbortController();
+    pollRef.current = controller;
+  
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  
+    (async () => {
+      let sawAnyOutput = false;
       try {
-        const pred = await fetchPrediction(id);
-        setPrediction(pred);
-
-        const out = pred.output || pred.result || pred.images;
-        if (out) {
-          const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
-          if (arr.length) {
-            setImages(arr);
-            sawAnyOutput = true;
-
-            // If we have partial output and a locked target, update the target with processing preview
-            const targetIdForPreview = currentTargetRef.current ?? (mode !== "edit" ? selectedNode?.id : null);
-            if (targetIdForPreview && nodeCanvasRef.current?.updateNode) {
-              try {
-                safeUpdateNode(targetIdForPreview, {
-                  data: { image: arr[arr.length - 1], status: pred.status === "succeeded" ? "done" : "processing", prompt: latestGenerationPromptRef.current || "" },
-                });
-                const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetIdForPreview) ?? null;
-                if (updated && selectedNode?.id === updated.id) setSelectedNode(updated);
-              } catch (e) {
-                // ignore preview update errors
-              }
-            }
-          }
-        }
-
-        if (sawAnyOutput && mode !== "preview" && mode !== "edit" && !generating) {
-          setMode("preview");
-        }
-
-        if (pred.status === "succeeded") {
-          const procKey = `pred:${id}`;
-          if (processedPredictionsRef.current.has(procKey)) {
-            // already handled by some other path — just cleanup and return
-            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-            currentTargetRef.current = null;
-            setGenerating(false);
-            setMode("edit");
-            return;
-          }
-
-          // Build finalization args & use finalizeOnce to dedupe across code paths
-          try {
-            const outFinal = pred.output || pred.result || pred.images;
-            if (outFinal) {
-              const arr = typeof outFinal === "string" ? [outFinal] : Array.isArray(outFinal) ? outFinal.flat() : [];
+        while (!controller.signal.aborted) {
+          const pred = await fetchPrediction(id, { signal: controller.signal });
+          setPrediction(pred);
+  
+          const out = pred.output || pred.result || pred.images;
+          if (out) {
+            const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
+            if (arr.length) {
               setImages(arr);
-
-              const last = arr[arr.length - 1];
-              if (last) {
-                const externalUrl = last;
-                const projectId = currentProjectId ?? null;
-                const positionForNewNode = selectedNode
-                  ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) }
-                  : { x: 120, y: 120 };
-
-                if (projectId) {
-                  const procKeyForFinalize = `pred:${id}`;
-                  try {
-                    const res = await finalizeOnce(procKeyForFinalize, {
-                      externalUrl,
-                      projectId,
-                      position: positionForNewNode,
-                      prompt: latestGenerationPromptRef.current || "",
-                      model: panelValues.model?.selected,
-                      sourceNodeId: mode === "edit" ? selectedNode?.id : null,
-                      nodeCanvasRef,
-                    });
-
-                    // res might be { alreadyProcessed: true } or server result
-                    const signedUrl = res?.signedUrl ?? externalUrl;
-                    if (res?.node) {
-                      const nodeRow = res.node;
-                      const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
-                      if (canonical) {
-                        const normalized = normalizeStoragePath(canonical);
-                        nodeStoragePathRef.current.set(nodeRow.id, normalized);
-                      }
-                    
-                      addNodeToCanvas({
-                        id: nodeRow.id,
-                        image: res.signedUrl ?? (canonical ? /* construct signed url later by hydration */ null : null),
-                        prompt: nodeRow.data?.prompt ?? "",
-                        model: nodeRow.data?.model ?? "",
-                        position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
-                        width: nodeRow.width ?? 260,
-                        height: nodeRow.height ?? 180,
-                      });
-
-                      if (res?.edge) {
-                        const edge = res.edge;
-                        const src = edge.source_node ?? edge.sourceId ?? edge.source;
-                        const tgt = edge.target_node ?? edge.targetId ?? edge.target;
-                        nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
-                      }
-                    } else if (res?.alreadyProcessed) {
-                      // already handled elsewhere — no-op
-                    } else {
-                      // fallback local add if server didn't return node
-                      enqueueOrAddImageNode({ imageUrl: signedUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
-                    }
-
-                    latestGenerationPromptRef.current = "";
-                  } catch (err) {
-                    // finalizeOnce will rollback its optimistic mark on error
-                    console.warn("Server finalize failed in poller, falling back to local add:", err);
-                    if (mode === "edit" && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
-                      const newId = nodeCanvasRef.current.addImageNode({
-                        image: externalUrl,
-                        prompt: latestGenerationPromptRef.current || "",
-                        model: panelValues.model?.selected,
-                        position: positionForNewNode,
-                      });
-                      if (newId && nodeCanvasRef.current?.addEdge && mode === "edit" && selectedNode?.id) {
-                        nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newId });
-                      }
-                    } else {
-                      enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
-                    }
-                    latestGenerationPromptRef.current = "";
-                  }
-                } else {
-                  enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
-                  latestGenerationPromptRef.current = "";
+              sawAnyOutput = true;
+  
+              const targetIdForPreview = currentTargetRef.current ?? (mode !== "edit" ? selectedNode?.id : null);
+              if (targetIdForPreview && nodeCanvasRef.current?.updateNode) {
+                try {
+                  safeUpdateNode(targetIdForPreview, {
+                    data: { image: arr[arr.length - 1], status: pred.status === "succeeded" ? "done" : "processing", prompt: latestGenerationPromptRef.current || "" },
+                  });
+                  const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetIdForPreview) ?? null;
+                  if (updated && selectedNode?.id === updated.id) setSelectedNode(updated);
+                } catch (e) {
+                  // ignore preview update errors
                 }
               }
             }
-
-            if (pollRef.current) {
-              clearInterval(pollRef.current);
-              pollRef.current = null;
+          }
+  
+          if (sawAnyOutput && mode !== "preview" && mode !== "edit" && !generating) {
+            setMode("preview");
+          }
+  
+          if (pred.status === "succeeded") {
+            const procKey = `pred:${id}`;
+            if (processedPredictionsRef.current.has(procKey)) {
+              stopPolling();
+              currentTargetRef.current = null;
+              setGenerating(false);
+              setMode("edit");
+              return;
             }
-            currentTargetRef.current = null;
-            setGenerating(false);
-            setMode("edit");
-          } catch (err) {
-            // in case of unexpected errors, ensure state is consistent
-            console.error("Error during poll finalize flow", err);
-            if (pollRef.current) {
-              clearInterval(pollRef.current);
-              pollRef.current = null;
+  
+            try {
+              const outFinal = pred.output || pred.result || pred.images;
+              if (outFinal) {
+                const arr = typeof outFinal === "string" ? [outFinal] : Array.isArray(outFinal) ? outFinal.flat() : [];
+                setImages(arr);
+  
+                const last = arr[arr.length - 1];
+                if (last) {
+                  const externalUrl = last;
+                  const projectId = currentProjectId ?? null;
+                  const positionForNewNode = selectedNode
+                    ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) }
+                    : { x: 120, y: 120 };
+  
+                  if (projectId) {
+                    const procKeyForFinalize = `pred:${id}`;
+                    try {
+                      const res = await finalizeOnce(procKeyForFinalize, {
+                        externalUrl,
+                        projectId,
+                        position: positionForNewNode,
+                        prompt: latestGenerationPromptRef.current || "",
+                        model: panelValues.model?.selected,
+                        sourceNodeId: mode === "edit" ? selectedNode?.id : null,
+                        nodeCanvasRef,
+                      });
+  
+                      const signedUrl = res?.signedUrl ?? externalUrl;
+                      if (res?.node) {
+                        const nodeRow = res.node;
+                        const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
+                        if (canonical) {
+                          const normalized = normalizeStoragePath(canonical);
+                          nodeStoragePathRef.current.set(nodeRow.id, normalized);
+                        }
+  
+                        addNodeToCanvas({
+                          id: nodeRow.id,
+                          image: res.signedUrl ?? (canonical ? null : null),
+                          prompt: nodeRow.data?.prompt ?? "",
+                          model: nodeRow.data?.model ?? "",
+                          position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
+                          width: nodeRow.width ?? 260,
+                          height: nodeRow.height ?? 180,
+                        });
+  
+                        if (res?.edge) {
+                          const edge = res.edge;
+                          const src = edge.source_node ?? edge.sourceId ?? edge.source;
+                          const tgt = edge.target_node ?? edge.targetId ?? edge.target;
+                          nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
+                        }
+                      } else if (res?.alreadyProcessed) {
+                        // already handled elsewhere — no-op
+                      } else {
+                        enqueueOrAddImageNode({ imageUrl: signedUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                      }
+                      latestGenerationPromptRef.current = "";
+                    } catch (err) {
+                      console.warn("Server finalize failed in poller, falling back to local add:", err);
+                      if (mode === "edit" && selectedNode?.id && nodeCanvasRef.current?.addImageNode) {
+                        const newId = nodeCanvasRef.current.addImageNode({
+                          image: externalUrl,
+                          prompt: latestGenerationPromptRef.current || "",
+                          model: panelValues.model?.selected,
+                          position: positionForNewNode,
+                        });
+                        if (newId && nodeCanvasRef.current?.addEdge && mode === "edit" && selectedNode?.id) {
+                          nodeCanvasRef.current.addEdge({ sourceId: selectedNode.id, targetId: newId });
+                        }
+                      } else {
+                        enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                      }
+                      latestGenerationPromptRef.current = "";
+                    }
+                  } else {
+                    enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                    latestGenerationPromptRef.current = "";
+                  }
+                }
+              }
+  
+              stopPolling();
+              currentTargetRef.current = null;
+              setGenerating(false);
+              setMode("edit");
+            } catch (err) {
+              console.error("Error during poll finalize flow", err);
+              stopPolling();
+              currentTargetRef.current = null;
+              setGenerating(false);
+              setMode("create");
             }
+            return;
+          } else if (pred.status === "failed") {
+            stopPolling();
             currentTargetRef.current = null;
             setGenerating(false);
             setMode("create");
+            setError(pred.error || "Generation failed");
+            return;
           }
-        } else if (pred.status === "failed") {
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
-          currentTargetRef.current = null;
-          setGenerating(false);
-          setMode("create");
-          setError(pred.error || "Generation failed");
+  
+          // wait before next iteration
+          await sleep(1200);
         }
       } catch (err) {
+        if (err.name === "AbortError") {
+          // normal cancellation
+          return;
+        }
         console.error("Polling error", err);
         setError(err.message || String(err));
-        if (pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
+        stopPolling();
         currentTargetRef.current = null;
         setGenerating(false);
         setMode("create");
+      } finally {
+        if (pollRef.current === controller) pollRef.current = null;
       }
-    }, 1200);
+    })();
   }
 
   // ===== Generate flow (UI entry point) =====
@@ -1142,37 +1153,43 @@ export default function Page() {
     setTimeout(() => setSelectedNode(node), 0);
   }, []);
 
-  const handleNodeChange = useCallback(async (node) => {
-    // Ignore programmatic updates that we suppressed
-    if (suppressNodeChangeRef.current) return;
-  
-    if (!currentProjectId || !node?.id) return;
-    // only persist server ids (uuid). you already have an isUuid helper; keep that logic.
-    if (!isUuid(node.id)) return;
-  
-    try {
-      // copy data so we can sanitize
-      const dataToPersist = { ...(node.data || {}) };
-  
-      // If we have canonical path recorded for this node, enforce it
-      const canonical = nodeStoragePathRef.current.get(node.id);
-      if (canonical) {
-        dataToPersist.image = canonical;
-      } else {
-        // If image is an absolute URL or signed URL, *do not persist it*
-        if (typeof dataToPersist.image === "string") {
-          if (looksLikeAbsoluteUrl(dataToPersist.image) || looksLikeSignedUrl(dataToPersist.image)) {
-            delete dataToPersist.image;
-          } else if (canonicalStorageRegex.test(dataToPersist.image)) {
-            // normalize to remove leading slash
-            dataToPersist.image = normalizeStoragePath(dataToPersist.image);
-          } else {
-            // unknown format -> be conservative and do not persist
-            delete dataToPersist.image;
-          }
+const handleNodeChange = useCallback((node) => {
+  // Ignore programmatic updates that we suppressed
+  if (suppressNodeChangeRef.current) return;
+
+  if (!currentProjectId || !node?.id) return;
+  // only persist server ids (uuid)
+  if (!isUuid(node.id)) return;
+
+  // Cancel existing timer for this node (if any)
+  const existing = nodeChangeTimersRef.current.get(node.id);
+  if (existing) clearTimeout(existing);
+
+  // Schedule a debounced persist
+  const timer = setTimeout(async () => {
+    // copy data so we can sanitize
+    const dataToPersist = { ...(node.data || {}) };
+
+    // If we have canonical path recorded for this node, enforce it
+    const canonical = nodeStoragePathRef.current.get(node.id);
+    if (canonical) {
+      dataToPersist.image = canonical;
+    } else {
+      // If image is an absolute URL or signed URL, *do not persist it*
+      if (typeof dataToPersist.image === "string") {
+        if (looksLikeAbsoluteUrl(dataToPersist.image) || looksLikeSignedUrl(dataToPersist.image)) {
+          delete dataToPersist.image;
+        } else if (canonicalStorageRegex.test(dataToPersist.image)) {
+          // normalize to remove leading slash
+          dataToPersist.image = normalizeStoragePath(dataToPersist.image);
+        } else {
+          // unknown format -> be conservative and do not persist
+          delete dataToPersist.image;
         }
       }
-  
+    }
+
+    try {
       await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes/${encodeURIComponent(node.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1186,8 +1203,13 @@ export default function Page() {
       });
     } catch (err) {
       console.warn("Failed to persist node change", err);
+    } finally {
+      nodeChangeTimersRef.current.delete(node.id);
     }
-  }, [currentProjectId]);
+  }, 350); // debounce delay (ms)
+
+  nodeChangeTimersRef.current.set(node.id, timer);
+}, [currentProjectId]);
 
   const handleEdgeCreate = useCallback(async (edge) => {
     // Basic guard
