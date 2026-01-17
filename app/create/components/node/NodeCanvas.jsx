@@ -86,155 +86,183 @@ const NodeCanvas = forwardRef(function NodeCanvas(
   }, [nodes]);
 
   // ---------- imperative API ----------
-  useImperativeHandle(ref, () => ({
-    /**
-     * Add image node.
-     * If `id` provided and matches existing node => update the node instead of adding duplicate.
-     * Returns the node id.
-     */
-    addImageNode({
-      id: providedId = null,
-      image = null,
-      prompt = "",
-      model = "",
-      position = null,
-      width = 260,
-      height = 180,
-    }) {
-      const idToUse = providedId || uid();
-      const defaultPos = { x: 80 + nodes.length * 40, y: 80 + nodes.length * 30 };
-      const pos = position || defaultPos;
-
-      // If node exists -> update it (idempotent). Otherwise add new.
-      setNodes((prev) => {
-        const existing = prev.find((n) => n.id === idToUse);
-        if (existing) {
-          return prev.map((n) =>
-            n.id === idToUse
-              ? {
-                  ...n,
-                  x: pos.x,
-                  y: pos.y,
-                  width,
-                  height,
-                  data: {
-                    ...(n.data || {}),
-                    image,
-                    prompt,
-                    model,
-                    status: image ? "done" : (n.data?.status || "empty"),
-                  },
-                }
-              : n
+  useImperativeHandle(
+    ref,
+    () => {
+      // helper: compute world coords at the center of the visible container
+      const getViewCenterWorld = () => {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (!rect) return { x: 120, y: 120 };
+        const clientX = rect.left + rect.width / 2;
+        const clientY = rect.top + rect.height / 2;
+        return clientToWorld({ clientX, clientY });
+      };
+  
+      return {
+        /**
+         * Add image node.
+         * If `id` provided and matches existing node => update the node instead of adding duplicate.
+         * Returns the node id.
+         */
+        addImageNode({
+          id: providedId = null,
+          image = null,
+          prompt = "",
+          model = "",
+          position = null,
+          width = 260,
+          height = 180,
+        }) {
+          const idToUse = providedId || uid();
+  
+          // If position not provided, prefer placing at the current viewport center (so node is visible).
+          // Fallback to the previous default offset strategy when client rect unavailable.
+          let pos = position;
+          if (!pos) {
+            try {
+              const centerWorld = getViewCenterWorld();
+              // place so node is centered around the view center
+              pos = { x: Math.round(centerWorld.x - width / 2), y: Math.round(centerWorld.y - height / 2) };
+            } catch (e) {
+              pos = { x: 80 + nodes.length * 40, y: 80 + nodes.length * 30 };
+            }
+          }
+  
+          // If node exists -> update it (idempotent). Otherwise add new.
+          setNodes((prev) => {
+            const existing = prev.find((n) => n.id === idToUse);
+            if (existing) {
+              return prev.map((n) =>
+                n.id === idToUse
+                  ? {
+                      ...n,
+                      x: pos.x,
+                      y: pos.y,
+                      width,
+                      height,
+                      data: {
+                        ...(n.data || {}),
+                        image,
+                        prompt,
+                        model,
+                        status: image ? "done" : (n.data?.status || "empty"),
+                      },
+                    }
+                  : n
+              );
+            }
+            const node = {
+              id: idToUse,
+              x: pos.x,
+              y: pos.y,
+              width,
+              height,
+              data: { image, prompt, model, status: image ? "done" : "empty" },
+            };
+            return [...prev, node];
+          });
+  
+          // After state update, select the node and notify parent.
+          requestAnimationFrame(() => {
+            setSelectedId(idToUse);
+            const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === idToUse) ?? null;
+            if (updated) onNodeSelect?.(updated);
+          });
+  
+          return idToUse;
+        },
+  
+        addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180 }) {
+          const world = clientToWorld({ clientX, clientY });
+          // convert client anchor point into node top-left so node centers at that client pos
+          const pos = { x: world.x - width / 2, y: world.y - height / 2 };
+          return ref.current?.addImageNode?.({ image, prompt, model, position: pos, width, height });
+        },
+  
+        updateNode(id, patch = {}) {
+          setNodes((prev) =>
+            prev.map((n) => {
+              if (n.id !== id) return n;
+              const merged = { ...n, ...patch };
+              merged.data = { ...(n.data || {}), ...(patch.data || {}) };
+              return merged;
+            })
           );
-        }
-        const node = {
-          id: idToUse,
-          x: pos.x,
-          y: pos.y,
-          width,
-          height,
-          data: { image, prompt, model, status: image ? "done" : "empty" },
-        };
-        return [...prev, node];
-      });
-
-      // After state update, select the node and notify parent.
-      requestAnimationFrame(() => {
-        setSelectedId(idToUse);
-        const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === idToUse) ?? null;
-        if (updated) onNodeSelect?.(updated);
-      });
-
-      return idToUse;
+  
+          // notify after update
+          requestAnimationFrame(() => {
+            setSelectedId(id);
+            const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === id) ?? null;
+            if (updated) {
+              onNodeSelect?.(updated);
+              // notify parent that node changed (persist)
+              onNodeChange?.(updated);
+            }
+          });
+  
+          return id;
+        },
+  
+        addEdge({ sourceId, targetId }) {
+          if (!sourceId || !targetId) return null;
+          // ensure nodes exist
+          const srcExists = nodes.some((n) => n.id === sourceId);
+          const tgtExists = nodes.some((n) => n.id === targetId);
+          if (!srcExists || !tgtExists) {
+            console.warn("addEdge: source or target does not exist", { sourceId, targetId });
+            return null;
+          }
+          // avoid duplicates
+          const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
+          if (exists) return null;
+          const edgeId = uid("edge_");
+          setEdges((prev) => {
+            const created = { id: edgeId, sourceId, targetId };
+            // also inform parent
+            onEdgeCreate?.(created);
+            return [...prev, created];
+          });
+          return edgeId;
+        },
+  
+        removeNode(id) {
+          if (!id) return;
+          const wasSelected = selectedId === id;
+  
+          setNodes((prev) => prev.filter((n) => n.id !== id));
+          setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
+          setSelectedId((prev) => (prev === id ? null : prev));
+  
+          if (wasSelected) {
+            setTimeout(() => {
+              onNodeSelect?.(null);
+            }, 0);
+          }
+          return id;
+        },
+  
+        getNodes() {
+          return nodes;
+        },
+  
+        getEdges() {
+          return edges;
+        },
+  
+        clear() {
+          setNodes([]);
+          setEdges([]);
+          setSelectedId(null);
+          requestAnimationFrame(() => onNodeSelect?.(null));
+        },
+  
+        // expose view-center helper for external callers (optional convenience)
+        getViewCenterWorld,
+      };
     },
-
-    addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180 }) {
-      const world = clientToWorld({ clientX, clientY });
-      return ref.current?.addImageNode?.({ image, prompt, model, position: world, width, height });
-    },
-
-    updateNode(id, patch = {}) {
-      setNodes((prev) =>
-        prev.map((n) => {
-          if (n.id !== id) return n;
-          const merged = { ...n, ...patch };
-          merged.data = { ...(n.data || {}), ...(patch.data || {}) };
-          return merged;
-        })
-      );
-
-      // notify after update
-      requestAnimationFrame(() => {
-        setSelectedId(id);
-        const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === id) ?? null;
-        if (updated) {
-          onNodeSelect?.(updated);
-          // notify parent that node changed (persist)
-          onNodeChange?.(updated);
-        }
-      });
-
-      return id;
-    },
-
-    addEdge({ sourceId, targetId }) {
-      if (!sourceId || !targetId) return null;
-      // ensure nodes exist
-      const srcExists = nodes.some((n) => n.id === sourceId);
-      const tgtExists = nodes.some((n) => n.id === targetId);
-      if (!srcExists || !tgtExists) {
-        console.warn("addEdge: source or target does not exist", { sourceId, targetId });
-        return null;
-      }
-      // avoid duplicates
-      const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
-      if (exists) return null;
-      const edgeId = uid("edge_");
-      setEdges((prev) => {
-        const created = { id: edgeId, sourceId, targetId };
-        // also inform parent
-        onEdgeCreate?.(created);
-        return [...prev, created];
-      });
-      return edgeId;
-    },
-
-    removeNode(id) {
-      if (!id) return;
-      // remember whether it was selected so we can notify parent after the state change
-      const wasSelected = selectedId === id;
-
-      setNodes((prev) => prev.filter((n) => n.id !== id));
-      setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
-
-      // update selectedId state synchronously
-      setSelectedId((prev) => (prev === id ? null : prev));
-
-      // Avoid calling onNodeSelect while rendering—defer to next tick
-      if (wasSelected) {
-        setTimeout(() => {
-          onNodeSelect?.(null);
-        }, 0);
-      }
-      return id;
-    },
-
-    getNodes() {
-      return nodes;
-    },
-
-    getEdges() {
-      return edges;
-    },
-
-    clear() {
-      setNodes([]);
-      setEdges([]);
-      setSelectedId(null);
-      requestAnimationFrame(() => onNodeSelect?.(null));
-    },
-  }), [nodes, edges, onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, clientToWorld]);
+    // keep dependencies minimal & stable; clientToWorld used because getViewCenterWorld relies on it
+    [nodes, edges, onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, clientToWorld]
+  );
 
   // ---------- port coords ----------
   function getPortWorld(node, port) {

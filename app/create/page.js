@@ -372,6 +372,32 @@ export default function Page() {
 
   // ===== Node helpers & UI-level helpers (kept in-page because they manipulate UI state) =====
 
+// compute a sensible top-left position so a node of given size appears centered
+// in the user's current NodeCanvas viewport.
+function getCanvasCenterTopLeft(width = 260, height = 180) {
+  try {
+    // If NodeCanvas exposes a view-center helper, use it (preferred).
+    // We placed getViewCenterWorld on the NodeCanvas imperative API.
+    if (nodeCanvasRef.current?.getViewCenterWorld) {
+      const center = nodeCanvasRef.current.getViewCenterWorld();
+      if (center && typeof center.x === "number" && typeof center.y === "number") {
+        return { x: Math.round(center.x - width / 2), y: Math.round(center.y - height / 2) };
+      }
+    }
+
+    // Fallback: compute using container bounding rect and current translate/scale (if accessible)
+    const rect = nodeCanvasRef.current && nodeCanvasRef.current.containerRef
+      ? nodeCanvasRef.current.containerRef.getBoundingClientRect?.()
+      : null;
+
+    // We can't reliably read containerRef from parent; fallback to simple center coordinates.
+    return { x: 120, y: 120 };
+  } catch (e) {
+    return { x: 120, y: 120 };
+  }
+}
+
+
   function findPlaceholderNodeId() {
     const nodes = nodeCanvasRef.current?.getNodes?.() ?? null;
     if (!nodes || !Array.isArray(nodes)) return null;
@@ -409,13 +435,15 @@ export default function Page() {
         console.error("updateNode(placeholder) failed, falling back to addImageNode", err);
       }
     }
-
-    // Otherwise use hook-backed add
-    addNodeViaQueue({ image: imageUrl, prompt: promptText, model: modelName });
+    const fallbackPos = getCanvasCenterTopLeft();
+    addNodeViaQueue({ image: imageUrl, prompt: promptText, model: modelName, position: fallbackPos });
   }
 
   function addEmptyNode({ position = null, width = null, height = null } = {}) {
-    let w = width; let h = height;
+    // derive width/height from ratio if not provided
+    let w = width;
+    let h = height;
+  
     const ratio = panelValues.ratio?.selected ?? "9:16";
     const parts = ratio.split(":").map((p) => Number(p));
     if ((!w || !h) && parts.length === 2 && !parts.some(isNaN)) {
@@ -426,7 +454,17 @@ export default function Page() {
     }
     if (!w) w = 260;
     if (!h) h = 180;
-    addNodeViaQueue({ image: null, prompt: "", model: "", position, width: w, height: h });
+  
+    // If caller provided an explicit position, use it. Otherwise compute the
+    // current viewport center top-left so the new node is visible to the user.
+    let pos = position;
+    if (!pos) {
+      pos = getCanvasCenterTopLeft(w, h);
+    }
+  
+    // Use hook-backed add (server-first if project exists). Pass position so server rows
+    // are created near the user's viewport center instead of at the fixed fallback.
+    addNodeViaQueue({ image: null, prompt: "", model: "", position: pos, width: w, height: h });
   }
 
   // Flush the hook's pending queue once the canvas is ready or hydration completes.
