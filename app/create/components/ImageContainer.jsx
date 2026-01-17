@@ -42,7 +42,7 @@ export default function ImageContainer({
       className={`w-full ${className}`}
       style={{ ...aspectStyle, maxWidth, maxHeight }}
     >
-      <div style={wrapperStyle} className={`w-full h-full relative overflow-hidden rounded-xs ${isEmpty ? 'border border-dashed border-border-main' : ''}`}>
+      <div style={wrapperStyle} className={`w-full h-full relative overflow-hidden  ${isEmpty ? 'border border-dashed border-border-main' : ''}`}>
         {isEmpty ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-sm text-main-white">
             <div className="mb-1">{aspect}</div>
