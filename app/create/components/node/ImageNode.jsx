@@ -9,10 +9,10 @@ import React, { useState } from "react";
  *  - onRemove(id)
  *  - onStartConnection(ev, node, port) // port: 'output'|'input'
  */
-export default function ImageNode({ node, isSelected = false, onRemove, onStartConnection }) {
-  const { data = {} } = node;
-  const { image, prompt, model, status } = data;
-  const [ isHovering, setIsHovering ] = useState(false); 
+export default function ImageNode({ node, isSelected = false, onRemove, onStartConnection, sourcePreview = null }) {
+    const { data = {} } = node;
+    const { image, prompt, model, status } = data;
+    const [ isHovering, setIsHovering ] = useState(false);
 
   const handleMouseEnter = () => { 
     setIsHovering(true); 
@@ -110,6 +110,17 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
       { isHovering && ( 
         <div className="w-24 h-4 bg-white">
             <p className="text-black">{prompt}</p>
+        </div>
+      )}
+      {sourcePreview && (
+        <div style={{ position: "absolute", left: 6, bottom: 6, width: 45, height: 45, borderRadius: 2, overflow: "hidden", zIndex: 60, boxShadow: "0 1px 4px rgba(0,0,0,0.35)" }}>
+          {sourcePreview.type === "image" ? (
+            <img src={sourcePreview.src} alt="source" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+          ) : (
+            <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: "#111", color: "#fff", fontWeight: 700 }}>
+              T
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
+import Image from "next/image";
 
 import Tools from "./components/Tools";
 import DownloadButton from "./components/DownloadButton";
@@ -20,6 +21,7 @@ import { finalizeGeneratedImage } from "@/lib/finalize";
 import { useProjectHydration } from "@/lib/hooks/useProjectHydration";
 import { usePollingPrediction } from "@/lib/hooks/usePollingPrediction";
 import { useNodeCanvasQueue } from "@/lib/hooks/useNodeCanvasQueue";
+import useClickOutside from "@/lib/hooks/useClickOutside";
 
 import { fetchPredictionApi, createPredictionApi } from "@/lib/api/predictions";
 import { createProjectNode as createProjectNodeApi } from "@/lib/api/projects";
@@ -41,6 +43,7 @@ export default function Page() {
   const [images, setImages] = useState([]);
   const [error, setError] = useState(null);
   const [referenceUrls, setReferenceUrls] = useState([]);
+  const [showNewNodePanel, setShowNewNodePanel] = useState(false);
 
   // Node + canvas refs + selections
   const pollRef = useRef(null); // retained for small cases but polling is via hook
@@ -57,6 +60,11 @@ export default function Page() {
   const looksLikeSignedUrl = (s) => typeof s === "string" && s.includes("/storage/v1/object/sign/");
   const canonicalStorageRegex = /^(?:\/)?projects\/[0-9a-fA-F-]{36}\/images\/.+$/i;
   const normalizeStoragePath = (p) => (typeof p === "string" ? (p.startsWith("/") ? p.slice(1) : p) : p);
+
+  const newNodePanelRef = useRef(null);
+  useClickOutside(newNodePanelRef, () => {
+    if (showNewNodePanel) setShowNewNodePanel(false);
+  }, { enabled: showNewNodePanel });
 
   const [files, setFiles] = useState([]);
   const filesRef = useRef(files);
@@ -218,7 +226,7 @@ export default function Page() {
       if (outFinal) {
         const arr = typeof outFinal === "string" ? [outFinal] : Array.isArray(outFinal) ? outFinal.flat() : [];
         setImages(arr);
-
+      
         const last = arr[arr.length - 1];
         if (last) {
           const externalUrl = last;
@@ -226,10 +234,18 @@ export default function Page() {
           const positionForNewNode = selectedNode
             ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) }
             : { x: 120, y: 120 };
-
+      
+          // gather sources for whatever target is currently locked (or null)
+          let gatheredForFinalize = { sourceNodeIds: [], imageRefs: [], textPrompt: null };
+          try {
+            const targetForFinalize = currentTargetRef.current ?? (mode !== "edit" ? selectedNode?.id : null);
+            gatheredForFinalize = await gatherSourcesForTarget(targetForFinalize);
+          } catch (err) {
+            console.warn("gatherSourcesForTarget (poller finalize) failed:", err);
+          }
+      
           if (projectId) {
             const procKeyForFinalize = `pred:${predictionId ?? externalUrl}`;
-
             try {
               const res = await finalizeOnce(procKeyForFinalize, {
                 externalUrl,
@@ -237,19 +253,18 @@ export default function Page() {
                 position: positionForNewNode,
                 prompt: latestGenerationPromptRef.current || "",
                 model: panelValues.model?.selected,
-                sourceNodeId: mode === "edit" ? selectedNode?.id : null,
+                sourceNodeIds: (gatheredForFinalize.sourceNodeIds && gatheredForFinalize.sourceNodeIds.length) ? gatheredForFinalize.sourceNodeIds : (mode === "edit" && selectedNode?.id ? [selectedNode.id] : []),
                 nodeCanvasRef,
               });
-
+      
               const signedUrl = res?.signedUrl ?? externalUrl;
               if (res?.node) {
                 const nodeRow = res.node;
                 const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
                 if (canonical) {
-                  const normalized = normalizeStoragePath(canonical);
-                  nodeStoragePathRef.current.set(nodeRow.id, normalized);
+                  nodeStoragePathRef.current.set(nodeRow.id, normalizeStoragePath(canonical));
                 }
-
+      
                 await addNodeViaQueue({
                   id: nodeRow.id,
                   image: res.signedUrl ?? null,
@@ -258,8 +273,9 @@ export default function Page() {
                   position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
                   width: nodeRow.width ?? 260,
                   height: nodeRow.height ?? 180,
+                  data: nodeRow.data ?? {},
                 });
-
+      
                 if (res?.edge) {
                   const edge = res.edge;
                   const src = edge.source_node ?? edge.sourceId ?? edge.source;
@@ -267,19 +283,21 @@ export default function Page() {
                   nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
                 }
               } else if (res?.alreadyProcessed) {
-                // already processed elsewhere — no-op
+                // already handled elsewhere — no-op
               } else {
-                // fallback: add via queue or enqueue
                 await addNodeViaQueue({ image: signedUrl, prompt: latestGenerationPromptRef.current || "", model: panelValues.model?.selected });
               }
             } catch (err) {
               console.warn("Server finalize failed in poller, falling back to local add:", err);
-              // final local fallback
               await addNodeViaQueue({ image: externalUrl, prompt: latestGenerationPromptRef.current || "", model: panelValues.model?.selected });
             }
           } else {
-            // no project -> purely local
-            await addNodeViaQueue({ image: externalUrl, prompt: latestGenerationPromptRef.current || "", model: panelValues.model?.selected });
+            await addNodeViaQueue({
+              image: externalUrl,
+              prompt: latestGenerationPromptRef.current || "",
+              model: panelValues.model?.selected,
+              data: { type: "image", image: externalUrl, prompt: latestGenerationPromptRef.current || "", model: panelValues.model?.selected, status: "done" },
+            });
           }
         }
       }
@@ -346,22 +364,24 @@ export default function Page() {
   }
 
   async function createPrediction(promptText, optionsArg = {}) {
-    // build absolute references
-    const absoluteRefs = referenceUrls.map((u) => (u && typeof window !== "undefined" && u.startsWith("/") ? `${window.location.origin}${u}` : u));
-    const payload = { prompt: promptText, references: absoluteRefs, options: optionsArg };
-
-    // call the API wrapper that returns parsed JSON or throws
-    const data = await createPredictionApi(payload);
-
-    // handle a few response shapes (same approach as before)
+    // If caller passed explicit references via optionsArg.references use them, otherwise use global referenceUrls state.
+    const explicitRefs = Array.isArray(optionsArg?.references) ? optionsArg.references : null;
+  
+    const absoluteRefs = explicitRefs
+      ? explicitRefs.map((u) => (u && typeof window !== "undefined" && u.startsWith("/") ? `${window.location.origin}${u}` : u))
+      : referenceUrls.map((u) => (u && typeof window !== "undefined" && u.startsWith("/") ? `${window.location.origin}${u}` : u));
+  
+    // call centralized API wrapper
+    const data = await createPredictionApi({ prompt: promptText, references: absoluteRefs ?? [], options: optionsArg ?? {} });
+  
+    // normalize response shapes (backwards compatibility)
     const id = data?.id || data?.prediction?.id || data?.predictionId || (data?.prediction && data.prediction.id) || null;
     if (isValidId(id)) return { id, raw: data };
-
-    // Some upstreams return the prediction result immediately (no id)
+  
     if (data && (data.status === "succeeded" || data.status === "processing" || data.status === "starting" || data.status === "failed")) {
       return { id: null, rawPrediction: data };
     }
-
+  
     throw new Error(`Create endpoint did not return an id. Response: ${JSON.stringify(data).slice(0, 400)}`);
   }
 
@@ -371,6 +391,106 @@ export default function Page() {
   }
 
   // ===== Node helpers & UI-level helpers (kept in-page because they manipulate UI state) =====
+
+  // Gather connected source nodes for a given target node id.
+  // Returns { sourceNodeIds: string[], imageRefs: string[], textPrompt: string|null }
+async function gatherSourcesForTarget(targetNodeId) {
+  if (!targetNodeId) return { sourceNodeIds: [], imageRefs: [], textPrompt: null };
+
+  const edges = nodeCanvasRef.current?.getEdges?.() ?? [];
+  const nodes = nodeCanvasRef.current?.getNodes?.() ?? [];
+
+  const incoming = edges.filter(
+    (e) => (e.targetId === targetNodeId) || (e.target_node === targetNodeId) || (e.target === targetNodeId)
+  );
+
+  const sourceNodeIds = [];
+  const storagePathsToSign = new Set();
+  const imageRefs = [];
+  let textPrompt = null;
+
+  for (const e of incoming) {
+    const srcId = e.sourceId ?? e.source_node ?? e.source;
+    if (!srcId) continue;
+    const srcNode = nodes.find((n) => n.id === srcId);
+    if (!srcNode) continue;
+    sourceNodeIds.push(srcId);
+
+    const img = srcNode?.data?.image;
+    if (img && typeof img === "string") {
+      if (looksLikeAbsoluteUrl(img) || looksLikeSignedUrl(img)) {
+        imageRefs.push(img);
+      } else if (canonicalStorageRegex.test(img) || nodeStoragePathRef.current.has(srcId) || img.startsWith("projects/")) {
+        // Prefer canonical mapping from nodeStoragePathRef if present; otherwise treat as storage path to exchange for signed URL.
+        const canonical = nodeStoragePathRef.current.get(srcId) ?? img;
+        // normalize and collect to sign
+        const normalized = normalizeStoragePath(canonical);
+        storagePathsToSign.add(normalized);
+      } else {
+        // unknown format — do not include raw path; skip
+        console.warn("Skipping unknown image format when gathering refs for generation", img);
+      }
+    }
+
+    const txt = srcNode?.data?.text;
+    if (txt && !textPrompt) {
+      textPrompt = txt;
+    }
+  }
+
+  // If we have storage paths that need signed URLs, call backend API to get signed URLs.
+  if (storagePathsToSign.size > 0) {
+    try {
+      // getSignedUrlsApi should accept an array and return { signedUrls: { "<path>": "<signedUrl>" } }
+      const paths = Array.from(storagePathsToSign);
+      const signedMap = await getSignedUrlsApi(paths);
+      // signedMap can be { signedUrls: { path: url, ... } } or directly { path: url }
+      const signedUrls = signedMap?.signedUrls ?? signedMap ?? {};
+
+      for (const p of paths) {
+        const s = signedUrls[p];
+        if (s && typeof s === "string") {
+          imageRefs.push(s);
+        } else {
+          console.warn("No signed URL returned for path when gathering refs:", p);
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to fetch signed URLs for references — proceeding with any absolute/signed refs only", err);
+    }
+  }
+
+  // Deduplicate and preserve order (incoming order prioritized)
+  const deduped = [];
+  const seen = new Set();
+  for (const r of imageRefs) {
+    if (!r) continue;
+    if (!seen.has(r)) {
+      deduped.push(r);
+      seen.add(r);
+    }
+  }
+
+  return { sourceNodeIds, imageRefs: deduped, textPrompt };
+}
+
+function addTextNodeAtCenter({ text = "" } = {}) {
+  const w = 260;
+  const h = 120;
+  const pos = getCanvasCenterTopLeft(w, h);
+
+  addNodeViaQueue({
+    image: null,
+    prompt: "",
+    model: "",
+    position: pos,
+    width: w,
+    height: h,
+    data: { type: "text", text },
+  });
+
+  setShowNewNodePanel(false);
+}
 
 // compute a sensible top-left position so a node of given size appears centered
 // in the user's current NodeCanvas viewport.
@@ -401,7 +521,15 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
   function findPlaceholderNodeId() {
     const nodes = nodeCanvasRef.current?.getNodes?.() ?? null;
     if (!nodes || !Array.isArray(nodes)) return null;
-    const placeholder = nodes.find((n) => !n?.data?.image);
+    // only treat nodes as placeholders if:
+    //  - they do NOT have an image
+    //  - AND they are NOT a text node (data.type !== 'text')
+    const placeholder = nodes.find((n) => {
+      const hasImage = Boolean(n?.data?.image);
+      const type = n?.data?.type;
+      if (type === "text") return false;
+      return !hasImage;
+    });
     return placeholder ? placeholder.id : null;
   }
 
@@ -410,24 +538,46 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
       console.warn("enqueueOrAddImageNode called with invalid imageUrl:", imageUrl);
       return;
     }
-
-    // Prefer updating the selected node if we're not in edit mode
+  
+    // If selected node exists and is NOT a text node, update it
     if (mode !== "edit" && selectedNode?.id && nodeCanvasRef.current?.updateNode) {
-      try {
-        nodeCanvasRef.current.updateNode(selectedNode.id, { data: { image: imageUrl, status: "done", prompt: promptText, model: modelName } });
-        const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === selectedNode.id) ?? null;
-        if (updated) setSelectedNode(updated);
-        return;
-      } catch (err) {
-        console.error("updateNode failed, falling back to addImageNode", err);
+      const selType = selectedNode?.data?.type;
+      if (selType !== "text") {
+        try {
+          nodeCanvasRef.current.updateNode(selectedNode.id, {
+            data: {
+              ...(selectedNode.data || {}),
+              image: imageUrl,
+              status: "done",
+              prompt: promptText,
+              model: modelName,
+              type: "image",
+            },
+          });
+          const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === selectedNode.id) ?? null;
+          if (updated) setSelectedNode(updated);
+          return;
+        } catch (err) {
+          console.error("updateNode failed, falling back to addImageNode", err);
+        }
       }
     }
-
-    // If nothing selected, prefer placeholder
+  
+    // Prefer placeholder that is NOT a text node
     const placeholderId = findPlaceholderNodeId();
     if (placeholderId && nodeCanvasRef.current?.updateNode && mode !== "edit") {
       try {
-        nodeCanvasRef.current.updateNode(placeholderId, { data: { image: imageUrl, status: "done", prompt: promptText, model: modelName } });
+        const existing = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === placeholderId) ?? {};
+        nodeCanvasRef.current.updateNode(placeholderId, {
+          data: {
+            ...(existing.data || {}),
+            image: imageUrl,
+            status: "done",
+            prompt: promptText,
+            model: modelName,
+            type: "image",
+          },
+        });
         const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === placeholderId) ?? null;
         if (updated) setSelectedNode(updated);
         return;
@@ -435,9 +585,16 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
         console.error("updateNode(placeholder) failed, falling back to addImageNode", err);
       }
     }
+    // fallback: add a new image node in view center; include explicit data so node.type is preserved
     const fallbackPos = getCanvasCenterTopLeft();
-    addNodeViaQueue({ image: imageUrl, prompt: promptText, model: modelName, position: fallbackPos });
-  }
+    addNodeViaQueue({
+      image: imageUrl,
+      prompt: promptText,
+      model: modelName,
+      position: fallbackPos,
+      data: { type: "image", image: imageUrl, prompt: promptText, model: modelName, status: "done" },
+    });
+  }  
 
   function addEmptyNode({ position = null, width = null, height = null } = {}) {
     // derive width/height from ratio if not provided
@@ -455,24 +612,26 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
     if (!w) w = 260;
     if (!h) h = 180;
   
-    // If caller provided an explicit position, use it. Otherwise compute the
-    // current viewport center top-left so the new node is visible to the user.
+    // compute center position if not provided
     let pos = position;
-    if (!pos) {
-      pos = getCanvasCenterTopLeft(w, h);
-    }
+    if (!pos) pos = getCanvasCenterTopLeft(w, h);
   
-    // Use hook-backed add (server-first if project exists). Pass position so server rows
-    // are created near the user's viewport center instead of at the fixed fallback.
-    addNodeViaQueue({ image: null, prompt: "", model: "", position: pos, width: w, height: h });
-  }
+    // Create a new empty image node (explicit data.type ensures consistent behavior)
+    addNodeViaQueue({
+      image: null,
+      prompt: "",
+      model: "",
+      position: pos,
+      width: w,
+      height: h,
+      data: { type: "image", status: "empty" },
+    });
+  }  
 
-  // Flush the hook's pending queue once the canvas is ready or hydration completes.
-  // We rely on the hydration hook to attempt canvas readiness; calling flushPending
-  // when hydrating becomes false avoids repeated polling of nodeCanvasRef.current.
+  // Flush the hook's pending queue once the canvas is ready or hydration changes.
+  // Avoid depending on nodeCanvasRef.current directly (it's a mutable ref).
   useEffect(() => {
     if (!nodeCanvasRef.current) return;
-    // flushPending is stable (see useNodeCanvasQueue implementation)
     (async () => {
       try {
         await flushPending();
@@ -480,8 +639,7 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
         console.warn("flushPending failed", e);
       }
     })();
-    // run when hydration status changes or when flushPending identity changes legitimately
-  }, [hydrating, flushPending]);
+  }, [hydrating, flushPending]); // run when hydration changes or flushPending identity changes
 
   // keyboard delete/backspace handler — don't run while typing
   useEffect(() => {
@@ -708,7 +866,10 @@ useEffect(() => {
 
     if (mode !== "edit" && selectedNode?.id && nodeCanvasRef.current?.updateNode) {
       try {
-        nodeCanvasRef.current.updateNode(selectedNode.id, { data: { image: url, status: "done", prompt, model: panelValues.model?.selected } });
+        const existing = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === selectedNode.id)?.data ?? {};
+        nodeCanvasRef.current.updateNode(selectedNode.id, {
+          data: { ...(existing || {}), image: url, status: "done", prompt, model: panelValues.model?.selected, type: existing.type ?? "image" },
+        });
         const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === selectedNode.id) ?? null;
         if (updated) setSelectedNode(updated);
         return;
@@ -740,97 +901,189 @@ useEffect(() => {
   
 
   // ===== Generate flow (UI entry point) =====
-  async function handleGenerate(e) {
-    e?.preventDefault();
-    setError(null);
-    setImages([]);
-    setPrediction(null);
 
-    const currentPrompt = prompt ?? "";
-    latestGenerationPromptRef.current = currentPrompt;
-    setPrompt("");
+async function handleGenerate(e) {
+  e?.preventDefault();
+  setError(null);
+  setImages([]);
+  setPrediction(null);
 
-    setGenerating(true);
+  const currentPrompt = prompt ?? "";
+  latestGenerationPromptRef.current = currentPrompt;
+  setPrompt("");
 
-    // target node lock
-    let targetNodeId = null;
-    if (mode !== "edit" && selectedNode?.id) targetNodeId = selectedNode.id;
-    else if (mode !== "edit") targetNodeId = findPlaceholderNodeId();
+  setGenerating(true);
 
-    if (targetNodeId && nodeCanvasRef.current?.updateNode) {
-      try {
-        currentTargetRef.current = targetNodeId;
-        safeUpdateNode(targetNodeId, { data: { status: "generating", prompt: currentPrompt, model: panelValues.model?.selected } });
-        const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetNodeId) ?? null;
-        if (updated) setSelectedNode(updated);
-      } catch (e) {
-        console.error("Could not mark target node as generating", e);
+  // Decide target node: prefer selected node if not in 'edit' mode
+  let targetNodeId = null;
+  if (mode !== "edit" && selectedNode?.id) {
+    targetNodeId = selectedNode.id;
+  } else if (mode !== "edit") {
+    targetNodeId = findPlaceholderNodeId();
+  }
+
+  // mark generating on target (optimistic)
+  if (targetNodeId && nodeCanvasRef.current?.updateNode) {
+    try {
+      currentTargetRef.current = targetNodeId;
+      safeUpdateNode(targetNodeId, { data: { status: "generating", prompt: currentPrompt, model: panelValues.model?.selected } });
+      const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === targetNodeId) ?? null;
+      if (updated) setSelectedNode(updated);
+    } catch (e) {
+      console.error("Could not mark target node as generating", e);
+    }
+  } else {
+    currentTargetRef.current = null;
+  }
+
+  setMode("generating");
+
+  // gather connected references/prompts for this target (secure: exchange storage paths for signed urls)
+  let gathered = { sourceNodeIds: [], imageRefs: [], textPrompt: null };
+  try {
+    gathered = await gatherSourcesForTarget(targetNodeId);
+  } catch (err) {
+    console.warn("gatherSourcesForTarget failed:", err);
+    gathered = { sourceNodeIds: [], imageRefs: [], textPrompt: null };
+  }
+
+  // choose effective prompt (text node overrides empty user prompt; otherwise user prompt wins)
+  const effectivePrompt = (currentPrompt && currentPrompt.trim().length > 0) ? currentPrompt : (gathered.textPrompt ?? "");
+
+  // build create options — include image references if present
+  const createOptions = { ...options };
+  if (gathered.imageRefs && gathered.imageRefs.length) createOptions.references = gathered.imageRefs;
+
+  try {
+    // call createPrediction (uses our lib/api wrapper underneath)
+    const create = await createPrediction(effectivePrompt, createOptions);
+
+    // raw prediction case (server responded with completed prediction immediately)
+    if (create.rawPrediction) {
+      const raw = create.rawPrediction;
+      setPrediction(raw);
+      const out = raw.output || raw.result || raw.images;
+      if (out) {
+        const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
+        setImages(arr);
+        const last = arr[arr.length - 1];
+        if (last) {
+          const externalUrl = last;
+          const procKey = `ext:${externalUrl}`;
+          if (!processedPredictionsRef.current.has(procKey)) {
+            if (currentProjectId) {
+              try {
+                const res = await finalizeOnce(procKey, {
+                  externalUrl,
+                  projectId: currentProjectId,
+                  position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
+                  prompt: latestGenerationPromptRef.current || "",
+                  model: panelValues.model?.selected,
+                  sourceNodeIds: (gathered.sourceNodeIds && gathered.sourceNodeIds.length) ? gathered.sourceNodeIds : (mode === "edit" && selectedNode?.id ? [selectedNode.id] : []),
+                  nodeCanvasRef,
+                });
+
+                if (res?.node) {
+                  const nodeRow = res.node;
+                  const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
+                  if (canonical) nodeStoragePathRef.current.set(nodeRow.id, normalizeStoragePath(canonical));
+                  await addNodeViaQueue({
+                    id: nodeRow.id,
+                    image: res.signedUrl ?? null,
+                    prompt: nodeRow.data?.prompt ?? "",
+                    model: nodeRow.data?.model ?? "",
+                    position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
+                    width: nodeRow.width ?? 260,
+                    height: nodeRow.height ?? 180,
+                    data: nodeRow.data ?? {},
+                  });
+                  if (res?.edge) {
+                    const edge = res.edge;
+                    const src = edge.source_node ?? edge.sourceId ?? edge.source;
+                    const tgt = edge.target_node ?? edge.targetId ?? edge.target;
+                    nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
+                  }
+                } else if (res?.alreadyProcessed) {
+                  // already processed elsewhere — no-op
+                } else {
+                  enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: latestGenerationPromptRef.current || "", modelName: panelValues.model?.selected });
+                }
+              } catch (err) {
+                console.warn("Finalize failed (rawPrediction path)", err);
+                enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: currentPrompt, modelName: panelValues.model?.selected });
+              }
+            } else {
+              enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
+            }
+          }
+        }
       }
-    } else {
+
+      setGenerating(false);
+      setMode("edit");
       currentTargetRef.current = null;
+      latestGenerationPromptRef.current = "";
+      return;
     }
 
-    setMode("generating");
+    // standard path with prediction id
+    const id = create.id;
+    if (!isValidId(id)) throw new Error("No valid prediction id returned from create endpoint.");
+    setPredictionId(id);
 
-    try {
-      const create = await createPrediction(currentPrompt, options);
+    // immediate fetch once (preview or instant success)
+    const first = await fetchPrediction(id);
+    setPrediction(first);
+    const out = first.output || first.result || first.images;
+    if (out) {
+      const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
+      setImages(arr);
 
-      // handle immediate/raw prediction result (no id)
-      if (create.rawPrediction) {
-        const raw = create.rawPrediction;
-        setPrediction(raw);
-        const out = raw.output || raw.result || raw.images;
-        if (out) {
-          const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
-          setImages(arr);
+      if (first.status === "succeeded") {
+        const procKey = `pred:${id}`;
+        if (!processedPredictionsRef.current.has(procKey)) {
           const last = arr[arr.length - 1];
           if (last) {
-            const externalUrl = last;
-            const procKey = `ext:${externalUrl}`;
-            if (!processedPredictionsRef.current.has(procKey)) {
-              if (currentProjectId) {
-                try {
-                  const res = await finalizeOnce(procKey, {
-                    externalUrl,
-                    projectId: currentProjectId,
-                    position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
-                    prompt: currentPrompt,
-                    model: panelValues.model?.selected,
-                    sourceNodeId: mode === "edit" ? selectedNode?.id : null,
-                    nodeCanvasRef,
-                  });
+            if (currentProjectId) {
+              try {
+                const res = await finalizeOnce(procKey, {
+                  externalUrl: last,
+                  projectId: currentProjectId,
+                  position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
+                  prompt: currentPrompt,
+                  model: panelValues.model?.selected,
+                  sourceNodeIds: (gathered.sourceNodeIds && gathered.sourceNodeIds.length) ? gathered.sourceNodeIds : (mode === "edit" && selectedNode?.id ? [selectedNode.id] : []),
+                  nodeCanvasRef,
+                });
 
-                  if (res?.node) {
-                    const nodeRow = res.node;
-                    const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
-                    if (canonical) nodeStoragePathRef.current.set(nodeRow.id, normalizeStoragePath(canonical));
-                    await addNodeViaQueue({
-                      id: nodeRow.id,
-                      image: res.signedUrl ?? null,
-                      prompt: nodeRow.data?.prompt ?? "",
-                      model: nodeRow.data?.model ?? "",
-                      position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
-                      width: nodeRow.width ?? 260,
-                      height: nodeRow.height ?? 180,
-                    });
-                    if (res?.edge) {
-                      const edge = res.edge;
-                      const src = edge.source_node ?? edge.sourceId ?? edge.source;
-                      const tgt = edge.target_node ?? edge.targetId ?? edge.target;
-                      nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
-                    }
-                  } else if (res?.alreadyProcessed) {
-                    // noop
-                  } else {
-                    enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: currentPrompt, modelName: panelValues.model?.selected });
+                if (res?.node) {
+                  await addNodeViaQueue({
+                    id: nodeRow.id,
+                    image: res.signedUrl ?? null,
+                    prompt: nodeRow.data?.prompt ?? "",
+                    model: nodeRow.data?.model ?? "",
+                    position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
+                    width: nodeRow.width ?? 260,
+                    height: nodeRow.height ?? 180,
+                    data: nodeRow.data ?? {},
+                  });
+                  if (res?.edge) {
+                    const edge = res.edge;
+                    const src = edge.source_node ?? edge.sourceId ?? edge.source;
+                    const tgt = edge.target_node ?? edge.targetId ?? edge.target;
+                    nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
                   }
-                } catch (err) {
-                  console.warn("Finalize failed (rawPrediction path)", err);
-                  enqueueOrAddImageNode({ imageUrl: externalUrl, promptText: currentPrompt, modelName: panelValues.model?.selected });
+                } else if (res?.alreadyProcessed) {
+                  // noop
+                } else {
+                  enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
                 }
-              } else {
+              } catch (err) {
+                console.warn("Finalize failed (immediate success)", err);
                 enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
               }
+            } else {
+              enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
             }
           }
         }
@@ -842,101 +1095,33 @@ useEffect(() => {
         return;
       }
 
-      // standard path with prediction id
-      const id = create.id;
-      if (!isValidId(id)) throw new Error("No valid prediction id returned from create endpoint.");
-      setPredictionId(id);
-
-      // immediate fetch for partial preview or instant success
-      const first = await fetchPrediction(id);
-      setPrediction(first);
-      const out = first.output || first.result || first.images;
-      if (out) {
-        const arr = typeof out === "string" ? [out] : Array.isArray(out) ? out.flat() : [];
-        setImages(arr);
-
-        if (first.status === "succeeded") {
-          const procKey = `pred:${id}`;
-          if (!processedPredictionsRef.current.has(procKey)) {
-            const last = arr[arr.length - 1];
-            if (last) {
-              if (currentProjectId) {
-                try {
-                  const res = await finalizeOnce(procKey, {
-                    externalUrl: last,
-                    projectId: currentProjectId,
-                    position: (mode === "edit" && selectedNode) ? { x: (selectedNode.x ?? 0) + (selectedNode.width ?? 260) + 80, y: (selectedNode.y ?? 0) } : null,
-                    prompt: currentPrompt,
-                    model: panelValues.model?.selected,
-                    sourceNodeId: mode === "edit" ? selectedNode?.id : null,
-                    nodeCanvasRef,
-                  });
-
-                  if (res?.node) {
-                    await addNodeViaQueue({
-                      id: res.node.id,
-                      image: res.signedUrl ?? last,
-                      prompt: res.node.data?.prompt ?? currentPrompt,
-                      model: res.node.data?.model ?? panelValues.model?.selected,
-                      position: { x: res.node.x ?? 120, y: res.node.y ?? 120 },
-                      width: res.node.width ?? 260,
-                      height: res.node.height ?? 180,
-                    });
-                    if (res?.edge) {
-                      const edge = res.edge;
-                      const src = edge.source_node ?? edge.sourceId ?? edge.source;
-                      const tgt = edge.target_node ?? edge.targetId ?? edge.target;
-                      nodeCanvasRef.current?.addEdge?.({ sourceId: src, targetId: tgt });
-                    }
-                  } else if (res?.alreadyProcessed) {
-                    // noop
-                  } else {
-                    enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
-                  }
-                } catch (err) {
-                  console.warn("Finalize failed (immediate success)", err);
-                  enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
-                }
-              } else {
-                enqueueOrAddImageNode({ imageUrl: last, promptText: currentPrompt, modelName: panelValues.model?.selected });
-              }
-            }
-          }
-
-          setGenerating(false);
-          setMode("edit");
-          currentTargetRef.current = null;
-          latestGenerationPromptRef.current = "";
-          return;
+      // partial preview
+      if (arr.length && first.status !== "succeeded") {
+        setMode("preview");
+        const previewTarget = currentTargetRef.current ?? (mode !== "edit" ? selectedNode?.id : null);
+        if (previewTarget && nodeCanvasRef.current?.updateNode) {
+          try {
+            nodeCanvasRef.current.updateNode(previewTarget, { data: { image: arr[arr.length - 1], status: "processing", prompt: latestGenerationPromptRef.current || "" } });
+            const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === previewTarget) ?? null;
+            if (updated) setSelectedNode(updated);
+          } catch (e) { /* ignore */ }
         }
-
-        // partial preview path
-        if (arr.length && first.status !== "succeeded") {
-          setMode("preview");
-          const previewTarget = currentTargetRef.current ?? (mode !== "edit" ? selectedNode?.id : null);
-          if (previewTarget && nodeCanvasRef.current?.updateNode) {
-            try {
-              nodeCanvasRef.current.updateNode(previewTarget, { data: { image: arr[arr.length - 1], status: "processing", prompt: latestGenerationPromptRef.current || "" } });
-              const updated = nodeCanvasRef.current.getNodes?.()?.find((n) => n.id === previewTarget) ?? null;
-              if (updated) setSelectedNode(updated);
-            } catch (e) { /* ignore */ }
-          }
-        }
-      } else {
-        setMode("generating");
       }
-
-      // start polling via hook
-      pollingStart(id);
-    } catch (err) {
-      console.error("handleGenerate error:", err);
-      setError(err.message || String(err));
-      setGenerating(false);
-      setMode("create");
-      currentTargetRef.current = null;
-      latestGenerationPromptRef.current = "";
+    } else {
+      setMode("generating");
     }
+
+    // start long-polling via hook (the hook will call onUpdate/onFinished)
+    pollingStart(id);
+  } catch (err) {
+    console.error("handleGenerate error:", err);
+    setError(err.message || String(err));
+    setGenerating(false);
+    setMode("create");
+    currentTargetRef.current = null;
+    latestGenerationPromptRef.current = "";
   }
+}
 
   // UI helpers (display etc.)
   const currentMode = mode ?? "";
@@ -952,15 +1137,64 @@ useEffect(() => {
             <div className="w-full h-full">
               <div className="w-full h-full p-2 flex items-center justify-center relative">
                 <div className="flex items-center gap-2 z-50 absolute top-1 right-1">
-                  <button
-                    type="button"
-                    onClick={() => addEmptyNode()}
-                    className="button-icon px-2 text-medium"
-                    aria-label="Add node to canvas"
-                    title="Add empty node"
-                  >
-                    new node
-                  </button>
+                <div className="relative">
+                    <button
+                      // ref={newNodePanelRef} fix this later!   
+                      type="button"
+                      onClick={() => setShowNewNodePanel((s) => !s)}
+                      className="button-icon px-2 text-medium flex flex-row items-center justify-center"
+                      aria-label="Add node to canvas"
+                      title="Add node"
+                    >
+                       <Image 
+                          src={'/plus-icon.svg'}
+                          height={11}
+                          width={11}
+                          alt="Image Icon"
+                          className="mr-2"
+                          />
+                       node
+                    </button>
+
+                    {showNewNodePanel && (
+                      <div
+                        className="bg-main absolute right-0 mt-1 w-44 text-medium p-1 rounded-xs border-border-main border mb-1.5 transform flex flex-col drop-shadow-md"
+                        style={{ zIndex: 1000 }}
+                        role="dialog"
+                        aria-label="Create node"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => { addEmptyNode(); setShowNewNodePanel(false); }}
+                          className="w-full text-left pl-1 pr-2 py-1 rounded-xs hover:bg-border-main hover:cursor-pointer flex flex-row  items-start"
+                        >
+                          <Image 
+                          src={'/Image_02.svg'}
+                          height={19}
+                          width={19}
+                          alt="Image Icon"
+                          className="mr-2"
+                          />
+                          Create image node
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => { addTextNodeAtCenter({ text: "" }); }}
+                          className="w-full text-left pl-1 pr-2 py-1 mt-1 rounded-xs hover:bg-border-main hover:cursor-pointer flex flex-row  items-start"
+                        >
+                          <Image 
+                          src={'/Text.svg'}
+                          height={19}
+                          width={19}
+                          alt="Text Icon"
+                          className="mr-2"
+                          />
+                          Create text node
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <NodeCanvas

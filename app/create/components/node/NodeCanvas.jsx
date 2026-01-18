@@ -9,6 +9,7 @@ import React, {
   useState,
 } from "react";
 import ImageNode from "./ImageNode";
+import TextNode from "./TextNode";
 
 function uid(prefix = "n_") {
   return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -99,85 +100,147 @@ const NodeCanvas = forwardRef(function NodeCanvas(
       };
   
       return {
-        /**
-         * Add image node.
-         * If `id` provided and matches existing node => update the node instead of adding duplicate.
-         * Returns the node id.
-         */
-        addImageNode({
-          id: providedId = null,
-          image = null,
-          prompt = "",
-          model = "",
-          position = null,
-          width = 260,
-          height = 180,
-        }) {
-          const idToUse = providedId || uid();
+        addNode({
+            id: providedId = null,
+            image = null,
+            prompt = undefined,
+            model = undefined,
+            position = null,
+            width = 260,
+            height = 180,
+            data: extraData = {},
+          }) {
+            const idToUse = providedId || uid();
+            const defaultPos = { x: 80 + nodes.length * 40, y: 80 + nodes.length * 30 };
+            const pos = position || defaultPos;
+      
+            // Add or update atomically using functional state update to avoid stale closures
+            setNodes((prev) => {
+              const existing = prev.find((n) => n.id === idToUse);
+      
+              if (existing) {
+                // Merge carefully: do not remove existing fields unless a new explicit value is provided.
+                const mergedData = {
+                  ...(existing.data || {}),
+                  ...(extraData || {}),
+                  // explicit override: only set image/prompt/model if caller provided non-undefined values
+                  ...(typeof image !== "undefined" ? { image } : {}),
+                  ...(typeof prompt !== "undefined" ? { prompt } : {}),
+                  ...(typeof model !== "undefined" ? { model } : {}),
+                };
+      
+                // Ensure status is consistent (if image present -> done)
+                if (mergedData.image) mergedData.status = mergedData.status ?? "done";
+                else mergedData.status = mergedData.status ?? (existing.data?.status ?? "empty");
+      
+                return prev.map((n) =>
+                  n.id === idToUse
+                    ? { ...n, x: pos.x, y: pos.y, width, height, data: mergedData }
+                    : n
+                );
+              }
+      
+              // New node creation: prefer explicit fields, otherwise fall back to extraData
+              const initData = {
+                ...(extraData || {}),
+                ...(typeof image !== "undefined" && image !== null ? { image } : {}),
+                ...(typeof prompt !== "undefined" ? { prompt } : {}),
+                ...(typeof model !== "undefined" ? { model } : {}),
+              };
+      
+              // If caller didn't set 'type' but included 'text', treat as text node
+              if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) {
+                initData.type = "text";
+              }
+      
+              // default status
+              if (initData.image) initData.status = initData.status ?? "done";
+              else initData.status = initData.status ?? "empty";
+      
+              const node = {
+                id: idToUse,
+                x: pos.x,
+                y: pos.y,
+                width,
+                height,
+                data: initData,
+              };
+              return [...prev, node];
+            });
+      
+            // After state update, select the node and notify parent.
+            requestAnimationFrame(() => {
+              setSelectedId(idToUse);
+              const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === idToUse) ?? null;
+              if (updated) onNodeSelect?.(updated);
+            });
+      
+            // return id
+            return idToUse;
+          },      
+          
+         // add an image node — forward `data` but do not overwrite an existing data.type
+addImageNode({
+    id = null,
+    image = null,
+    prompt = "",
+    model = "",
+    position = null,
+    width = 260,
+    height = 180,
+    data = {},
+  } = {}) {
+    // Preserve any explicit type from incoming data (e.g. text nodes from DB).
+    const incomingType = data?.type;
+    const mergedData = {
+      ...(data || {}),
+      // Only set type to "image" when caller didn't supply a type.
+      type: typeof incomingType !== "undefined" && incomingType !== null ? incomingType : "image",
+      // Only set image/prompt/model when caller provided explicit args (so hydration won't be overwritten).
+      image: typeof image !== "undefined" ? image : data?.image,
+      prompt: typeof prompt !== "undefined" ? prompt : data?.prompt,
+      model: typeof model !== "undefined" ? model : data?.model,
+      status: typeof data?.status !== "undefined" ? data.status : (image ? "done" : (data?.status ?? "empty")),
+    };
   
-          // If position not provided, prefer placing at the current viewport center (so node is visible).
-          // Fallback to the previous default offset strategy when client rect unavailable.
-          let pos = position;
-          if (!pos) {
-            try {
-              const centerWorld = getViewCenterWorld();
-              // place so node is centered around the view center
-              pos = { x: Math.round(centerWorld.x - width / 2), y: Math.round(centerWorld.y - height / 2) };
-            } catch (e) {
-              pos = { x: 80 + nodes.length * 40, y: 80 + nodes.length * 30 };
-            }
-          }
+    return ref.current?.addNode?.({
+      id,
+      // pass explicit fields (some callers expect these), and the canonical `data`
+      image,
+      prompt,
+      model,
+      position,
+      width,
+      height,
+      data: mergedData,
+    });
+  },
   
-          // If node exists -> update it (idempotent). Otherwise add new.
-          setNodes((prev) => {
-            const existing = prev.find((n) => n.id === idToUse);
-            if (existing) {
-              return prev.map((n) =>
-                n.id === idToUse
-                  ? {
-                      ...n,
-                      x: pos.x,
-                      y: pos.y,
-                      width,
-                      height,
-                      data: {
-                        ...(n.data || {}),
-                        image,
-                        prompt,
-                        model,
-                        status: image ? "done" : (n.data?.status || "empty"),
-                      },
-                    }
-                  : n
-              );
-            }
-            const node = {
-              id: idToUse,
-              x: pos.x,
-              y: pos.y,
-              width,
-              height,
-              data: { image, prompt, model, status: image ? "done" : "empty" },
-            };
-            return [...prev, node];
-          });
+  // add image at client position and forward data, without clobbering existing type
+  addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180, data = {} } = {}) {
+    const world = clientToWorld({ clientX, clientY });
+    const pos = { x: Math.round(world.x - width / 2), y: Math.round(world.y - height / 2) };
   
-          // After state update, select the node and notify parent.
-          requestAnimationFrame(() => {
-            setSelectedId(idToUse);
-            const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === idToUse) ?? null;
-            if (updated) onNodeSelect?.(updated);
-          });
+    const incomingType = data?.type;
+    const mergedData = {
+      ...(data || {}),
+      type: typeof incomingType !== "undefined" && incomingType !== null ? incomingType : "image",
+      image: typeof image !== "undefined" ? image : data?.image,
+      prompt: typeof prompt !== "undefined" ? prompt : data?.prompt,
+      model: typeof model !== "undefined" ? model : data?.model,
+      status: typeof data?.status !== "undefined" ? data.status : (image ? "done" : (data?.status ?? "empty")),
+    };
   
-          return idToUse;
-        },
-  
-        addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180 }) {
-          const world = clientToWorld({ clientX, clientY });
-          // convert client anchor point into node top-left so node centers at that client pos
-          const pos = { x: world.x - width / 2, y: world.y - height / 2 };
-          return ref.current?.addImageNode?.({ image, prompt, model, position: pos, width, height });
-        },
+    return ref.current?.addNode?.({
+      image,
+      prompt,
+      model,
+      position: pos,
+      width,
+      height,
+      data: mergedData,
+    });
+  },
   
         updateNode(id, patch = {}) {
           setNodes((prev) =>
@@ -623,57 +686,107 @@ const NodeCanvas = forwardRef(function NodeCanvas(
             const isSelected = node.id === selectedId;
             const dragging = draggingRef.current && draggingRef.current.id === node.id;
             const wrapperStyle = {
-              position: "absolute",
-              left: node.x,
-              top: node.y,
-              width: node.width,
-              height: node.height,
-              boxSizing: "border-box",
-              transition: dragging ? "none" : "left 150ms ease, top 150ms ease",
-              zIndex: isSelected ? 1000 : 500,
-              cursor: dragging ? "grabbing" : "grab",
+                position: "absolute",
+                left: node.x,
+                top: node.y,
+                width: node.width,
+                height: node.height,
+                boxSizing: "border-box",
+                transition: dragging ? "none" : "left 150ms ease, top 150ms ease",
+                zIndex: isSelected ? 1000 : 500,
+                cursor: dragging ? "grabbing" : "grab",
             };
 
+            // Compute single incoming source preview (same as before)
+            let sourcePreview = null;
+            try {
+                const incomingEdge = edges.find((e) =>
+                (e.targetId === node.id) || (e.target_node === node.id) || (e.target === node.id)
+                );
+                if (incomingEdge) {
+                const srcId = incomingEdge.sourceId ?? incomingEdge.source_node ?? incomingEdge.source;
+                if (srcId) {
+                    const srcNode = nodes.find((n) => n.id === srcId);
+                    if (srcNode) {
+                    if (srcNode.data?.image) {
+                        sourcePreview = { type: "image", src: srcNode.data.image };
+                    } else if (srcNode.data?.text) {
+                        sourcePreview = { type: "text" };
+                    }
+                    }
+                }
+                }
+            } catch (e) {
+                sourcePreview = null;
+            }
+
+            // Decide component by explicit type first — most robust.
+            const explicitType = node?.data?.type;
+            const looksLikeText = explicitType === "text" || (!explicitType && node?.data?.text && !node?.data?.image);
+
             return (
-              <div
+                <div
                 key={node.id}
                 style={wrapperStyle}
                 onPointerDown={(e) => onNodePointerDown(e, node)}
                 onPointerUp={(e) => { try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch (_) {} }}
-              >
+                >
                 <div style={{
-                  position: "absolute",
-                  inset: 0,
-                  pointerEvents: "none",
-                  borderRadius: 6,
-                  boxShadow: isSelected ? "0 0 0 1px #ACACAC" : "none",
+                    position: "absolute",
+                    inset: 0,
+                    pointerEvents: "none",
+                    borderRadius: 6,
+                    boxShadow: isSelected ? "0 0 0 1px #ACACAC" : "none",
                 }} />
 
                 <div style={{ width: "100%", height: "100%" }}>
-                  <ImageNode
-                    node={node}
-                    isSelected={isSelected}
-                    onRemove={(id) => {
-                      // Call parent handler if provided (so server can delete).
-                      // Parent should call nodeCanvasRef.current.removeNode(id) after successful server delete.
-                      if (onNodeRemove) {
-                        onNodeRemove(id);
-                      } else {
-                        // fallback local removal
-                        setNodes(prev => prev.filter(n => n.id !== id));
-                        setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
-                        if (selectedId === id) {
-                          setSelectedId(null);
-                          onNodeSelect?.(null);
+                    {looksLikeText ? (
+                    <TextNode
+                        node={node}
+                        isSelected={isSelected}
+                        sourcePreview={sourcePreview}
+                        onCommit={(newText) => {
+                        try {
+                            ref.current?.updateNode?.(node.id, { data: { ...(node.data || {}), text: newText } });
+                        } catch (err) {
+                            setNodes((prev) => prev.map((n) => n.id === node.id ? { ...n, data: { ...(n.data||{}), text: newText } } : n));
+                            onNodeChange?.({ ...node, data: { ...(node.data||{}), text: newText } });
                         }
-                      }
-                    }}
-                    onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
-                  />
+                        }}
+                        onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
+                        onRemove={(id) => {
+                        if (onNodeRemove) onNodeRemove(id);
+                        else {
+                            setNodes(prev => prev.filter(n => n.id !== id));
+                            setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
+                            if (selectedId === id) { setSelectedId(null); onNodeSelect?.(null); }
+                        }
+                        }}
+                    />
+                    ) : (
+                    <ImageNode
+                        node={node}
+                        isSelected={isSelected}
+                        sourcePreview={sourcePreview}
+                        onRemove={(id) => {
+                        if (onNodeRemove) {
+                            onNodeRemove(id);
+                        } else {
+                            setNodes(prev => prev.filter(n => n.id !== id));
+                            setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
+                            if (selectedId === id) {
+                            setSelectedId(null);
+                            onNodeSelect?.(null);
+                            }
+                        }
+                        }}
+                        onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
+                    />
+                    )}
                 </div>
-              </div>
+                </div>
             );
-          })}
+            })}
         </div>
       </div>
     </div>
