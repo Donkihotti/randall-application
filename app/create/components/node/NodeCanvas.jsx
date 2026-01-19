@@ -87,7 +87,7 @@ const NodeCanvas = forwardRef(function NodeCanvas(
     setWorldSize({ w, h });
   }, [nodes]);
 
- // keyboard handler useEffect to delete the selected edge when the user presses Delete/Backspace
+  // ---------- keyboard: Delete for selected edge ----------
   useEffect(() => {
     const isTypingInEditable = () => {
       const el = document.activeElement;
@@ -97,31 +97,99 @@ const NodeCanvas = forwardRef(function NodeCanvas(
       if (el.isContentEditable) return true;
       return false;
     };
-  
+
     const onKeyDownEdge = (e) => {
       if (e.isComposing) return;
       if ((e.key === "Delete" || e.key === "Backspace") && !isTypingInEditable()) {
         if (selectedEdgeId) {
-          // notify parent with edge object (find it)
           const edgeObj = edges.find((ed) => ed.id === selectedEdgeId);
           if (edgeObj) {
-            try {
-              setEdges(prev => prev.filter((ed) => ed.id !== selectedEdgeId));
-              onEdgeRemove?.(edgeObj);
-            } catch (err) {
-              console.warn("Failed to remove edge locally", err);
-            } finally {
-              setSelectedEdgeId(null);
-            }
+            // local removal
+            setEdges((prev) => prev.filter((ed) => ed.id !== selectedEdgeId));
+            setSelectedEdgeId(null);
+            try { onEdgeRemove?.(edgeObj); } catch (err) { console.warn("onEdgeRemove failed", err); }
           }
         }
       }
     };
-  
+
     window.addEventListener("keydown", onKeyDownEdge);
     return () => window.removeEventListener("keydown", onKeyDownEdge);
   }, [selectedEdgeId, edges, onEdgeRemove]);
-  
+
+  // ---------- small helper: add or update node in a single place ----------
+  const addOrUpdateNode = useCallback(async ({
+    id = null,
+    image,
+    prompt,
+    model,
+    position = null,
+    width = 260,
+    height = 180,
+    data = {},
+  } = {}) => {
+    // perform functional update to avoid stale closures
+    let idToUse = id;
+    setNodes((prev) => {
+      // compute default pos based on current length
+      const defaultPos = { x: 80 + prev.length * 40, y: 80 + prev.length * 30 };
+      const pos = position || defaultPos;
+      if (idToUse) {
+        // update if present else append
+        const existing = prev.find((n) => n.id === idToUse);
+        if (existing) {
+          const mergedData = {
+            ...(existing.data || {}),
+            ...(data || {}),
+            ...(typeof image !== "undefined" ? { image } : {}),
+            ...(typeof prompt !== "undefined" ? { prompt } : {}),
+            ...(typeof model !== "undefined" ? { model } : {}),
+          };
+          if (mergedData.image) mergedData.status = mergedData.status ?? "done";
+          else mergedData.status = mergedData.status ?? (existing.data?.status ?? "empty");
+          return prev.map((n) => n.id === idToUse ? { ...n, x: pos.x, y: pos.y, width, height, data: mergedData } : n);
+        } else {
+          // will append with provided id
+          const initData = {
+            ...(data || {}),
+            ...(typeof image !== "undefined" && image !== null ? { image } : {}),
+            ...(typeof prompt !== "undefined" ? { prompt } : {}),
+            ...(typeof model !== "undefined" ? { model } : {}),
+          };
+          if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) initData.type = "text";
+          if (initData.image) initData.status = initData.status ?? "done"; else initData.status = initData.status ?? "empty";
+          const node = { id: idToUse, x: pos.x, y: pos.y, width, height, data: initData };
+          return [...prev, node];
+        }
+      } else {
+        // create new id and append
+        idToUse = uid();
+        const initData = {
+          ...(data || {}),
+          ...(typeof image !== "undefined" && image !== null ? { image } : {}),
+          ...(typeof prompt !== "undefined" ? { prompt } : {}),
+          ...(typeof model !== "undefined" ? { model } : {}),
+        };
+        if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) initData.type = "text";
+        if (initData.image) initData.status = initData.status ?? "done"; else initData.status = initData.status ?? "empty";
+        const node = { id: idToUse, x: pos.x, y: pos.y, width, height, data: initData };
+        return [...prev, node];
+      }
+    });
+
+    // after mutation, select and notify parent
+    requestAnimationFrame(() => {
+      setSelectedId(idToUse);
+      const updated = (containerRef.current && ref && ref.current && typeof ref.current?.getNodes === "function")
+        ? ref.current.getNodes?.().find((nn) => nn.id === idToUse) ?? null
+        : (nodes.find((n) => n.id === idToUse) ?? null);
+      // fall back to reading the component state directly
+      const fallbackUpdated = nodes.find((n) => n.id === idToUse) ?? null;
+      onNodeSelect?.(updated ?? fallbackUpdated ?? null);
+    });
+
+    return idToUse;
+  }, [nodes, onNodeSelect, ref]);
 
   // ---------- imperative API ----------
   useImperativeHandle(
@@ -135,150 +203,58 @@ const NodeCanvas = forwardRef(function NodeCanvas(
         const clientY = rect.top + rect.height / 2;
         return clientToWorld({ clientX, clientY });
       };
-  
+
       return {
-        addNode({
-            id: providedId = null,
-            image = null,
-            prompt = undefined,
-            model = undefined,
-            position = null,
-            width = 260,
-            height = 180,
-            data: extraData = {},
-          }) {
-            const idToUse = providedId || uid();
-            const defaultPos = { x: 80 + nodes.length * 40, y: 80 + nodes.length * 30 };
-            const pos = position || defaultPos;
-      
-            // Add or update atomically using functional state update to avoid stale closures
-            setNodes((prev) => {
-              const existing = prev.find((n) => n.id === idToUse);
-      
-              if (existing) {
-                // Merge carefully: do not remove existing fields unless a new explicit value is provided.
-                const mergedData = {
-                  ...(existing.data || {}),
-                  ...(extraData || {}),
-                  // explicit override: only set image/prompt/model if caller provided non-undefined values
-                  ...(typeof image !== "undefined" ? { image } : {}),
-                  ...(typeof prompt !== "undefined" ? { prompt } : {}),
-                  ...(typeof model !== "undefined" ? { model } : {}),
-                };
-      
-                // Ensure status is consistent (if image present -> done)
-                if (mergedData.image) mergedData.status = mergedData.status ?? "done";
-                else mergedData.status = mergedData.status ?? (existing.data?.status ?? "empty");
-      
-                return prev.map((n) =>
-                  n.id === idToUse
-                    ? { ...n, x: pos.x, y: pos.y, width, height, data: mergedData }
-                    : n
-                );
-              }
-      
-              // New node creation: prefer explicit fields, otherwise fall back to extraData
-              const initData = {
-                ...(extraData || {}),
-                ...(typeof image !== "undefined" && image !== null ? { image } : {}),
-                ...(typeof prompt !== "undefined" ? { prompt } : {}),
-                ...(typeof model !== "undefined" ? { model } : {}),
-              };
-      
-              // If caller didn't set 'type' but included 'text', treat as text node
-              if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) {
-                initData.type = "text";
-              }
-      
-              // default status
-              if (initData.image) initData.status = initData.status ?? "done";
-              else initData.status = initData.status ?? "empty";
-      
-              const node = {
-                id: idToUse,
-                x: pos.x,
-                y: pos.y,
-                width,
-                height,
-                data: initData,
-              };
-              return [...prev, node];
-            });
-      
-            // After state update, select the node and notify parent.
-            requestAnimationFrame(() => {
-              setSelectedId(idToUse);
-              const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === idToUse) ?? null;
-              if (updated) onNodeSelect?.(updated);
-            });
-      
-            // return id
-            return idToUse;
-          },      
-          
-         // add an image node — forward `data` but do not overwrite an existing data.type
-addImageNode({
-    id = null,
-    image = null,
-    prompt = "",
-    model = "",
-    position = null,
-    width = 260,
-    height = 180,
-    data = {},
-  } = {}) {
-    // Preserve any explicit type from incoming data (e.g. text nodes from DB).
-    const incomingType = data?.type;
-    const mergedData = {
-      ...(data || {}),
-      // Only set type to "image" when caller didn't supply a type.
-      type: typeof incomingType !== "undefined" && incomingType !== null ? incomingType : "image",
-      // Only set image/prompt/model when caller provided explicit args (so hydration won't be overwritten).
-      image: typeof image !== "undefined" ? image : data?.image,
-      prompt: typeof prompt !== "undefined" ? prompt : data?.prompt,
-      model: typeof model !== "undefined" ? model : data?.model,
-      status: typeof data?.status !== "undefined" ? data.status : (image ? "done" : (data?.status ?? "empty")),
-    };
-  
-    return ref.current?.addNode?.({
-      id,
-      // pass explicit fields (some callers expect these), and the canonical `data`
-      image,
-      prompt,
-      model,
-      position,
-      width,
-      height,
-      data: mergedData,
-    });
-  },
-  
-  // add image at client position and forward data, without clobbering existing type
-  addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180, data = {} } = {}) {
-    const world = clientToWorld({ clientX, clientY });
-    const pos = { x: Math.round(world.x - width / 2), y: Math.round(world.y - height / 2) };
-  
-    const incomingType = data?.type;
-    const mergedData = {
-      ...(data || {}),
-      type: typeof incomingType !== "undefined" && incomingType !== null ? incomingType : "image",
-      image: typeof image !== "undefined" ? image : data?.image,
-      prompt: typeof prompt !== "undefined" ? prompt : data?.prompt,
-      model: typeof model !== "undefined" ? model : data?.model,
-      status: typeof data?.status !== "undefined" ? data.status : (image ? "done" : (data?.status ?? "empty")),
-    };
-  
-    return ref.current?.addNode?.({
-      image,
-      prompt,
-      model,
-      position: pos,
-      width,
-      height,
-      data: mergedData,
-    });
-  },
-  
+        // generic add/update node (low-level)
+        addNode(args = {}) {
+          return addOrUpdateNode(args);
+        },
+
+        // add a text node — forward `data` and ensure `type: "text"`
+        addTextNode({ id = null, text = "", position = null, width = 260, height = 120, data = {} } = {}) {
+          const mergedData = { ...(data || {}), type: data?.type ?? "text", text: typeof text !== "undefined" ? text : (data?.text ?? ""), status: data?.status ?? (text ? "done" : "empty") };
+          return addOrUpdateNode({ id, position, width, height, data: mergedData });
+        },
+
+        // add an image node — forward `data` but do not overwrite an existing data.type
+        addImageNode({
+          id = null,
+          image = null,
+          prompt = "",
+          model = "",
+          position = null,
+          width = 260,
+          height = 180,
+          data = {},
+        } = {}) {
+          const incomingType = data?.type;
+          const mergedData = {
+            ...(data || {}),
+            type: typeof incomingType !== "undefined" && incomingType !== null ? incomingType : "image",
+            image: typeof image !== "undefined" ? image : data?.image,
+            prompt: typeof prompt !== "undefined" ? prompt : data?.prompt,
+            model: typeof model !== "undefined" ? model : data?.model,
+            status: typeof data?.status !== "undefined" ? data.status : (image ? "done" : (data?.status ?? "empty")),
+          };
+          return addOrUpdateNode({ id, image, prompt, model, position, width, height, data: mergedData });
+        },
+
+        // add image at client position (centers node on pointer)
+        addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180, data = {} } = {}) {
+          const world = clientToWorld({ clientX, clientY });
+          const pos = { x: Math.round(world.x - width / 2), y: Math.round(world.y - height / 2) };
+          const incomingType = data?.type;
+          const mergedData = {
+            ...(data || {}),
+            type: typeof incomingType !== "undefined" && incomingType !== null ? incomingType : "image",
+            image: typeof image !== "undefined" ? image : data?.image,
+            prompt: typeof prompt !== "undefined" ? prompt : data?.prompt,
+            model: typeof model !== "undefined" ? model : data?.model,
+            status: typeof data?.status !== "undefined" ? data.status : (image ? "done" : (data?.status ?? "empty")),
+          };
+          return addOrUpdateNode({ image, prompt, model, position: pos, width, height, data: mergedData });
+        },
+
         updateNode(id, patch = {}) {
           setNodes((prev) =>
             prev.map((n) => {
@@ -288,129 +264,144 @@ addImageNode({
               return merged;
             })
           );
-  
+
           // notify after update
           requestAnimationFrame(() => {
             setSelectedId(id);
-            const updated = ref.current?.getNodes?.()?.find((nn) => nn.id === id) ?? null;
+            const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
+              ? ref.current.getNodes?.()?.find((nn) => nn.id === id) ?? null
+              : nodes.find((nn) => nn.id === id) ?? null;
             if (updated) {
               onNodeSelect?.(updated);
-              // notify parent that node changed (persist)
               onNodeChange?.(updated);
             }
           });
-  
+
           return id;
         },
-  
+
         addEdge({ id: providedEdgeId = null, sourceId, targetId } = {}) {
-            if (!sourceId || !targetId) return null;
-            // ensure nodes exist
-            const srcExists = nodes.some((n) => n.id === sourceId);
-            const tgtExists = nodes.some((n) => n.id === targetId);
-            if (!srcExists || !tgtExists) {
-              console.warn("addEdge: source or target does not exist", { sourceId, targetId });
-              return null;
-            }
-            // avoid duplicates
-            const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
-            if (exists) return null;
-          
-            const edgeId = providedEdgeId || uid("edge_");
-            setEdges((prev) => {
-              const created = { id: edgeId, sourceId, targetId };
-              // also inform parent (server create will be handled by outer code)
-              onEdgeCreate?.(created);
-              return [...prev, created];
-            });
-            return edgeId;
-          },
-            
-          removeEdge(edgeId) {
-            if (!edgeId) return;
-            setEdges((prev) => prev.filter((e) => e.id !== edgeId));
-            // if this edge was selected, clear selection
-            setSelectedEdgeId((prev) => (prev === edgeId ? null : prev));
-          },
-  
-          removeNode(id) {
-            if (!id) return;
-            const wasSelected = selectedId === id;
-          
-            setNodes((prev) => prev.filter((n) => n.id !== id));
-            setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
-            setSelectedId((prev) => (prev === id ? null : prev));
-            // also clear selected edge if it referenced this node
-            setSelectedEdgeId((prev) => {
-              if (!prev) return null;
-              const stillExists = edges.some((ed) => ed.id === prev && ed.sourceId !== id && ed.targetId !== id);
-              return stillExists ? prev : null;
-            });
-          
-            if (wasSelected) {
-              setTimeout(() => {
-                onNodeSelect?.(null);
-              }, 0);
-            }
-            return id;
-          },
-          
-          getNodes() {
-            return nodes;
-          },
-          
-          getEdges() {
-            return edges;
-          },
-  
-          getViewCenterWorld,
-          centerOnNode(nodeId, { animate = false } = {}) {
-            try {
-              const node = nodes.find((n) => n.id === nodeId);
-              if (!node || !containerRef.current) return;
-              const rect = containerRef.current.getBoundingClientRect();
-              const centerClientX = rect.left + rect.width / 2;
-              const centerClientY = rect.top + rect.height / 2;
-          
-              // compute desired translate so node is centered in view
-              const desiredTranslateX = centerClientX - (node.x + node.width / 2) * scale - rect.left;
-              const desiredTranslateY = centerClientY - (node.y + node.height / 2) * scale - rect.top;
-          
-              if (animate) {
-                // simple animation: ease into new translate with requestAnimationFrame
-                const start = { ...translate };
-                const end = { x: desiredTranslateX, y: desiredTranslateY };
-                const dur = 220;
-                const t0 = performance.now();
-                const step = (now) => {
-                  const p = Math.min(1, (now - t0) / dur);
-                  const eased = p * (2 - p);
-                  setTranslate({ x: start.x + (end.x - start.x) * eased, y: start.y + (end.y - start.y) * eased });
-                  if (p < 1) requestAnimationFrame(step);
-                };
-                requestAnimationFrame(step);
-              } else {
-                setTranslate({ x: desiredTranslateX, y: desiredTranslateY });
+          if (!sourceId || !targetId) return null;
+          // ensure nodes exist
+          const srcExists = nodes.some((n) => n.id === sourceId);
+          const tgtExists = nodes.some((n) => n.id === targetId);
+          if (!srcExists || !tgtExists) {
+            console.warn("addEdge: source or target does not exist", { sourceId, targetId });
+            return null;
+          }
+          // avoid duplicates
+          const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
+          if (exists) return null;
+
+          const edgeId = providedEdgeId || uid("edge_");
+          setEdges((prev) => {
+            const created = { id: edgeId, sourceId, targetId };
+            // notify parent (server create will be handled by outer code)
+            onEdgeCreate?.(created);
+            return [...prev, created];
+          });
+          return edgeId;
+        },
+
+        removeEdge(edgeId) {
+          if (!edgeId) return null;
+          setEdges((prev) => prev.filter((e) => e.id !== edgeId));
+          setSelectedEdgeId((prev) => (prev === edgeId ? null : prev));
+          return edgeId;
+        },
+
+        // remove edge by endpoints (source+target)
+        removeEdgeByEndpoints({ sourceId, targetId } = {}) {
+          if (!sourceId || !targetId) return null;
+          let removed = null;
+          setEdges((prev) => {
+            const remain = prev.filter((e) => {
+              if (e.sourceId === sourceId && e.targetId === targetId) {
+                removed = e.id;
+                return false;
               }
-            } catch (e) {
-              // ignore
-            }
-          },
-          
-          clear() {
-            setNodes([]);
-            setEdges([]);
-            setSelectedId(null);
-            setSelectedEdgeId(null);
-            requestAnimationFrame(() => onNodeSelect?.(null));
-          },
-  
-        // expose view-center helper for external callers (optional convenience)
+              return true;
+            });
+            return remain;
+          });
+          if (removed && selectedEdgeId === removed) setSelectedEdgeId(null);
+          return removed;
+        },
+
+        removeNode(id) {
+          if (!id) return;
+          const wasSelected = selectedId === id;
+
+          setNodes((prev) => prev.filter((n) => n.id !== id));
+          setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
+          setSelectedId((prev) => (prev === id ? null : prev));
+          setSelectedEdgeId((prev) => {
+            if (!prev) return null;
+            const stillExists = edges.some((ed) => ed.id === prev && ed.sourceId !== id && ed.targetId !== id);
+            return stillExists ? prev : null;
+          });
+
+          if (wasSelected) {
+            setTimeout(() => onNodeSelect?.(null), 0);
+          }
+          return id;
+        },
+
+        getNodes() {
+          return nodes;
+        },
+
+        getEdges() {
+          return edges;
+        },
+
         getViewCenterWorld,
+        centerOnNode(nodeId, { animate = false } = {}) {
+          try {
+            const node = nodes.find((n) => n.id === nodeId);
+            if (!node || !containerRef.current) return false;
+            const rect = containerRef.current.getBoundingClientRect();
+
+            // compute desired translate so node center maps to rect center
+            const nodeCenterWorld = { x: node.x + (node.width ?? 260) / 2, y: node.y + (node.height ?? 180) / 2 };
+            const centerClientX = rect.width / 2;
+            const centerClientY = rect.height / 2;
+
+            const desiredTranslateX = centerClientX - nodeCenterWorld.x * scale;
+            const desiredTranslateY = centerClientY - nodeCenterWorld.y * scale;
+
+            if (animate) {
+              const start = { ...translate };
+              const end = { x: desiredTranslateX, y: desiredTranslateY };
+              const dur = 220;
+              const t0 = performance.now();
+              const step = (now) => {
+                const p = Math.min(1, (now - t0) / dur);
+                const eased = p * (2 - p);
+                setTranslate({ x: start.x + (end.x - start.x) * eased, y: start.y + (end.y - start.y) * eased });
+                if (p < 1) requestAnimationFrame(step);
+              };
+              requestAnimationFrame(step);
+            } else {
+              setTranslate({ x: desiredTranslateX, y: desiredTranslateY });
+            }
+            return true;
+          } catch (e) {
+            return false;
+          }
+        },
+
+        clear() {
+          setNodes([]);
+          setEdges([]);
+          setSelectedId(null);
+          setSelectedEdgeId(null);
+          requestAnimationFrame(() => onNodeSelect?.(null));
+        },
       };
     },
-    // keep dependencies minimal & stable; clientToWorld used because getViewCenterWorld relies on it
-    [nodes, edges, onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, clientToWorld]
+    // dependencies: keep minimal but include values used inside API
+    [addOrUpdateNode, clientToWorld, nodes, edges, onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, scale, translate]
   );
 
   // ---------- port coords ----------
@@ -565,6 +556,7 @@ addImageNode({
     try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch (_) {}
     draggingRef.current = { id: node.id, startClientX: e.clientX, startClientY: e.clientY, originX: node.x, originY: node.y };
     setSelectedId(node.id);
+    setSelectedEdgeId(null); // clear edge selection when selecting a node
     onNodeSelect?.(node);
   };
 
@@ -573,6 +565,7 @@ addImageNode({
     const wantPan = e.button === 0 || e.button === 1 || spacePressedRef.current;
     if (!wantPan) {
       setSelectedId(null);
+      setSelectedEdgeId(null);
       onNodeSelect?.(null);
       return;
     }
@@ -756,63 +749,57 @@ addImageNode({
       >
         <div style={worldStyle}>
           <svg width={svgWidth} height={svgHeight} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }}>
-          {edges.map((edge) => {
-            const s = nodes.find((n) => n.id === edge.sourceId);
-            const t = nodes.find((n) => n.id === edge.targetId);
-            if (!s || !t) return null;
-            const d = getEdgePath(s, t);
-            const isSelectedEdge = selectedEdgeId === edge.id;
+            {edges.map((edge) => {
+              const s = nodes.find((n) => n.id === edge.sourceId);
+              const t = nodes.find((n) => n.id === edge.targetId);
+              if (!s || !t) return null;
+              const d = getEdgePath(s, t);
+              const isSelectedEdge = selectedEdgeId === edge.id;
 
-            // visible stroke (thin)
-            const visible = (
+              // visible stroke
+              const visible = (
                 <path
-                key={`vis-${edge.id}`}
-                d={d}
-                stroke={isSelectedEdge ? "#ACACAC" : "#2E2E2E"}
-                strokeWidth={isSelectedEdge ? 2 : 2}
-                fill="none"
-                strokeLinecap="round"
-                style={{ pointerEvents: "none" }}
+                  key={`vis-${edge.id}`}
+                  d={d}
+                  stroke={isSelectedEdge ? "#ACACAC" : "#2E2E2E"}
+                  strokeWidth={2}
+                  fill="none"
+                  strokeLinecap="round"
+                  style={{ pointerEvents: "none" }}
                 />
-            );
+              );
 
-            // pointer-capture stroke (invisible but wide) for reliable hit-testing
-            const picker = (
+              // invisible but wide stroke for hit-testing + events
+              const picker = (
                 <path
-                key={`pick-${edge.id}`}
-                d={d}
-                stroke="transparent"
-                strokeWidth={16}
-                fill="none"
-                strokeLinecap="round"
-                style={{ cursor: "pointer", pointerEvents: "stroke" }}
-                onPointerDown={(ev) => {
+                  key={`pick-${edge.id}`}
+                  d={d}
+                  stroke="transparent"
+                  strokeWidth={16}
+                  fill="none"
+                  strokeLinecap="round"
+                  style={{ cursor: "pointer", pointerEvents: "stroke" }}
+                  onPointerDown={(ev) => {
                     ev.stopPropagation();
                     setSelectedEdgeId(edge.id);
-                    // notify parent selection if needed
-                    if (typeof onEdgeCreate === "function") {
-                    // no-op: keep original onEdgeCreate for creation; add onEdgeSelect prop if you want
-                    }
-                }}
-                onDoubleClick={(ev) => {
-                    // double-click to remove quickly (also Delete key supported)
+                    // do not remove automatically; parent may show controls
+                  }}
+                  onDoubleClick={(ev) => {
                     ev.stopPropagation();
-                    // remove locally and inform parent to persist removal
-                    try {
+                    // quick delete on double-click
                     setEdges(prev => prev.filter(e => e.id !== edge.id));
-                    onEdgeRemove?.(edge);
                     setSelectedEdgeId(null);
-                    } catch (e) {}
-                }}
+                    try { onEdgeRemove?.(edge); } catch (err) { console.warn("onEdgeRemove failed", err); }
+                  }}
                 />
-            );
+              );
 
-            return (
+              return (
                 <g key={`edge-group-${edge.id}`}>
-                {visible}
-                {picker}
+                  {visible}
+                  {picker}
                 </g>
-            );
+              );
             })}
             {connectingRef.current && (
               <path d={getTempPath()} stroke="#D9D9D9" opacity={0.9} strokeWidth={2} fill="none" strokeDasharray="6 6" strokeLinecap="round" />
@@ -823,109 +810,108 @@ addImageNode({
             const isSelected = node.id === selectedId;
             const dragging = draggingRef.current && draggingRef.current.id === node.id;
             const wrapperStyle = {
-                position: "absolute",
-                left: node.x,
-                top: node.y,
-                width: node.width,
-                height: node.height,
-                boxSizing: "border-box",
-                transition: dragging ? "none" : "left 150ms ease, top 150ms ease",
-                zIndex: isSelected ? 1000 : 500,
-                cursor: dragging ? "grabbing" : "grab",
+              position: "absolute",
+              left: node.x,
+              top: node.y,
+              width: node.width,
+              height: node.height,
+              boxSizing: "border-box",
+              transition: dragging ? "none" : "left 150ms ease, top 150ms ease",
+              zIndex: isSelected ? 1000 : 500,
+              cursor: dragging ? "grabbing" : "grab",
             };
 
-            // Compute single incoming source preview (same as before)
+            // Compute single incoming source preview
             let sourcePreview = null;
             try {
-                const incomingEdge = edges.find((e) =>
+              const incomingEdge = edges.find((e) =>
                 (e.targetId === node.id) || (e.target_node === node.id) || (e.target === node.id)
-                );
-                if (incomingEdge) {
+              );
+              if (incomingEdge) {
                 const srcId = incomingEdge.sourceId ?? incomingEdge.source_node ?? incomingEdge.source;
                 if (srcId) {
-                    const srcNode = nodes.find((n) => n.id === srcId);
-                    if (srcNode) {
+                  const srcNode = nodes.find((n) => n.id === srcId);
+                  if (srcNode) {
                     if (srcNode.data?.image) {
-                        sourcePreview = { type: "image", src: srcNode.data.image };
+                      sourcePreview = { type: "image", src: srcNode.data.image };
                     } else if (srcNode.data?.text) {
-                        sourcePreview = { type: "text" };
+                      sourcePreview = { type: "text" };
                     }
-                    }
+                  }
                 }
-                }
+              }
             } catch (e) {
-                sourcePreview = null;
+              sourcePreview = null;
             }
 
-            // Decide component by explicit type first — most robust.
+            // Decide component by explicit type first
             const explicitType = node?.data?.type;
             const looksLikeText = explicitType === "text" || (!explicitType && node?.data?.text && !node?.data?.image);
 
             return (
-                <div
+              <div
                 key={node.id}
                 style={wrapperStyle}
                 onPointerDown={(e) => onNodePointerDown(e, node)}
                 onPointerUp={(e) => { try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch (_) {} }}
-                >
+              >
                 <div style={{
-                    position: "absolute",
-                    inset: 0,
-                    pointerEvents: "none",
-                    borderRadius: 6,
-                    boxShadow: isSelected ? "0 0 0 1px #ACACAC" : "none",
+                  position: "absolute",
+                  inset: 0,
+                  pointerEvents: "none",
+                  borderRadius: 6,
+                  boxShadow: isSelected ? "0 0 0 1px #ACACAC" : "none",
                 }} />
 
                 <div style={{ width: "100%", height: "100%" }}>
-                    {looksLikeText ? (
-                    <>
+                  {looksLikeText ? (
                     <TextNode
-                        node={node}
-                        isSelected={isSelected}
-                        sourcePreview={sourcePreview}
-                        onCommit={(newText) => {
+                      node={node}
+                      isSelected={isSelected}
+                      sourcePreview={sourcePreview}
+                      onCommit={(newText) => {
                         try {
-                            ref.current?.updateNode?.(node.id, { data: { ...(node.data || {}), text: newText } });
+                          // prefer imperative API update
+                          ref.current?.updateNode?.(node.id, { data: { ...(node.data || {}), text: newText } });
                         } catch (err) {
-                            setNodes((prev) => prev.map((n) => n.id === node.id ? { ...n, data: { ...(n.data||{}), text: newText } } : n));
-                            onNodeChange?.({ ...node, data: { ...(node.data||{}), text: newText } });
+                          setNodes((prev) => prev.map((n) => n.id === node.id ? { ...n, data: { ...(n.data || {}), text: newText } } : n));
+                          onNodeChange?.({ ...node, data: { ...(node.data || {}), text: newText } });
                         }
-                        }}
-                        onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
-                        onRemove={(id) => {
+                      }}
+                      onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
+                      onRemove={(id) => {
                         if (onNodeRemove) onNodeRemove(id);
                         else {
-                            setNodes(prev => prev.filter(n => n.id !== id));
-                            setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
-                            if (selectedId === id) { setSelectedId(null); onNodeSelect?.(null); }
+                          setNodes(prev => prev.filter(n => n.id !== id));
+                          setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
+                          if (selectedId === id) { setSelectedId(null); onNodeSelect?.(null); }
                         }
-                        }}
+                      }}
                     />
-                    </>
-                    ) : (
+                  ) : (
                     <ImageNode
-                        node={node}
-                        isSelected={isSelected}
-                        sourcePreview={sourcePreview}
-                        onRemove={(id) => {
+                      node={node}
+                      isSelected={isSelected}
+                      sourcePreview={sourcePreview}
+                      onRemove={(id) => {
                         if (onNodeRemove) {
-                            onNodeRemove(id);
+                          onNodeRemove(id);
                         } else {
-                            setNodes(prev => prev.filter(n => n.id !== id));
-                            setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
-                            if (selectedId === id) {
+                          setNodes(prev => prev.filter(n => n.id !== id));
+                          setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
+                          if (selectedId === id) {
                             setSelectedId(null);
                             onNodeSelect?.(null);
-                            }
+                          }
                         }
-                        }}
-                        onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
+                      }}
+                      onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
                     />
-                    )}
+                  )}
                 </div>
-                </div>
+              </div>
             );
-            })}
+          })}
         </div>
       </div>
     </div>

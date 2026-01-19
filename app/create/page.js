@@ -447,7 +447,6 @@ useEffect(() => {
   return () => { mounted = false; };
 }, [hydrating, currentProjectId]);
 
-
   // NodeCanvas center viewport on open helper
   async function ensureCanvasReady({ timeoutMs = CANVAS_READY_TIMEOUT, intervalMs = 40 } = {}) {
     const start = Date.now();
@@ -603,19 +602,19 @@ async function gatherSourcesForTarget(targetNodeId) {
   return { sourceNodeIds, imageRefs: deduped, textPrompt };
 }
 
-function addTextNodeAtCenter({ text = "" } = {}) {
+async function addTextNodeAtCenter({ text = "" } = {}) {
   const w = 260;
   const h = 120;
   const pos = getCanvasCenterTopLeft(w, h);
 
-  addNodeViaQueue({
+  await addNodeAndMarkEdited({
     image: null,
     prompt: "",
     model: "",
     position: pos,
     width: w,
     height: h,
-    data: { type: "text", text },
+    data: { type: "text", text, status: text ? "done" : "empty" },
   });
 
   setShowNewNodePanel(false);
@@ -1022,30 +1021,46 @@ useEffect(() => {
     setTimeout(() => setSelectedNode(node), 0);
   }, []);
 
-  const handleEdgeRemove = useCallback(async (edge) => {
-    if (!edge) return;
-    // local immediate removal (canvas)
-    try {
+const handleEdgeDelete = useCallback(async (edge) => {
+  if (!edge) return false;
+  // optimistically remove from canvas
+  try {
+    if (edge.id) {
       nodeCanvasRef.current?.removeEdge?.(edge.id);
-    } catch (e) {}
-  
-    // try to persist to server if we have a project
-    if (!currentProjectId) return;
-    try {
-      // Best-effort delete. The server route can handle edgeId OR source/target payload.
+    } else if (edge.sourceId && edge.targetId) {
+      nodeCanvasRef.current?.removeEdgeByEndpoints?.({ sourceId: edge.sourceId, targetId: edge.targetId });
+    }
+  } catch (err) {
+    console.warn("Local edge remove failed", err);
+  }
+
+  // persist server-side when project present
+  if (!currentProjectId) return true;
+  try {
+    // Prefer RESTful URL with edge id; fallback to endpoints body when id missing
+    if (edge.id) {
+      const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges/${encodeURIComponent(edge.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        console.warn("Edge delete failed on server", await res.text().catch(() => ""));
+      }
+      return res.ok;
+    } else {
+      // server route that accepts source/target in body
       const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ edgeId: edge.id, sourceNode: edge.sourceId, targetNode: edge.targetId }),
+        body: JSON.stringify({ sourceNode: edge.sourceId, targetNode: edge.targetId }),
       });
       if (!res.ok) {
-        // server may expect other semantics; log and continue (canvas already updated)
-        console.warn("Edge delete failed on server", res.status, await res.text().catch(() => ""));
+        console.warn("Edge delete by endpoints failed on server", await res.text().catch(() => ""));
       }
-    } catch (err) {
-      console.warn("Failed to delete edge on server", err);
+      return res.ok;
     }
-  }, [currentProjectId]);  
+  } catch (err) {
+    console.warn("handleEdgeDelete error", err);
+    return false;
+  }
+}, [currentProjectId]);
 
   // ===== Generate flow (UI entry point) =====
 
@@ -1132,13 +1147,11 @@ async function handleGenerate(e) {
 
                 if (res?.node) {
                   const nodeRow = res.node;
-                  const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
-                  if (canonical) nodeStoragePathRef.current.set(nodeRow.id, normalizeStoragePath(canonical));
                   await addNodeAndMarkEdited({
                     id: nodeRow.id,
-                    image: res.signedUrl ?? null,
-                    prompt: nodeRow.data?.prompt ?? "",
-                    model: nodeRow.data?.model ?? "",
+                    image: res.signedUrl ?? nodeRow.data?.image ?? null,
+                    prompt: nodeRow.data?.prompt ?? currentPrompt,
+                    model: nodeRow.data?.model ?? panelValues.model?.selected,
                     position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
                     width: nodeRow.width ?? 260,
                     height: nodeRow.height ?? 180,
@@ -1204,11 +1217,12 @@ async function handleGenerate(e) {
                 });
 
                 if (res?.node) {
+                  const nodeRow = res.node;
                   await addNodeAndMarkEdited({
                     id: nodeRow.id,
-                    image: res.signedUrl ?? null,
-                    prompt: nodeRow.data?.prompt ?? "",
-                    model: nodeRow.data?.model ?? "",
+                    image: res.signedUrl ?? nodeRow.data?.image ?? null,
+                    prompt: nodeRow.data?.prompt ?? currentPrompt,
+                    model: nodeRow.data?.model ?? panelValues.model?.selected,
                     position: { x: nodeRow.x ?? 120, y: nodeRow.y ?? 120 },
                     width: nodeRow.width ?? 260,
                     height: nodeRow.height ?? 180,
@@ -1349,7 +1363,7 @@ async function handleGenerate(e) {
                 onNodeSelect={handleNodeSelect}
                 onNodeChange={handleNodeChange}
                 onEdgeCreate={handleEdgeCreate}
-                onEdgeRemove={handleEdgeRemove}
+                onEdgeRemove={handleEdgeDelete} 
                 onNodeRemove={handleNodeRemove}
               />
               </div>
