@@ -568,13 +568,22 @@ const NodeCanvas = forwardRef(function NodeCanvas(
 
   // ---------- canvas pointer down for panning ----------
   const onCanvasPointerDown = (e) => {
+    // Always clear selections when the canvas background is clicked.
+    // Node and edge elements call e.stopPropagation(), so clicks on them won't reach this handler.
+    setSelectedId(null);
+    setSelectedEdgeId(null);
+    onNodeSelect?.(null);
+  
+    // Decide whether we should start panning.
+    // Keep existing semantics: allow panning for left/middle click or when Space is held.
     const wantPan = e.button === 0 || e.button === 1 || spacePressedRef.current;
+  
+    // If the user clicked with a non-panning button (e.g. right-click) do nothing else.
     if (!wantPan) {
-      setSelectedId(null);
-      setSelectedEdgeId(null);
-      onNodeSelect?.(null);
       return;
     }
+  
+    // Start panning. Prevent default to avoid accidental text selection and ensure consistent behavior.
     e.preventDefault();
     try { containerRef.current.setPointerCapture?.(e.pointerId); } catch (_) {}
     panningRef.current = { startClientX: e.clientX, startClientY: e.clientY, originTranslate: { ...translate } };
