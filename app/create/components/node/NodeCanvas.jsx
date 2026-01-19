@@ -177,16 +177,19 @@ const NodeCanvas = forwardRef(function NodeCanvas(
       }
     });
 
-    // after mutation, select and notify parent
+    // after mutation, enforce single-selection (clear any selected edge), select node and notify parent
     requestAnimationFrame(() => {
-      setSelectedId(idToUse);
-      const updated = (containerRef.current && ref && ref.current && typeof ref.current?.getNodes === "function")
-        ? ref.current.getNodes?.().find((nn) => nn.id === idToUse) ?? null
-        : (nodes.find((n) => n.id === idToUse) ?? null);
-      // fall back to reading the component state directly
-      const fallbackUpdated = nodes.find((n) => n.id === idToUse) ?? null;
-      onNodeSelect?.(updated ?? fallbackUpdated ?? null);
-    });
+    // ensure only a node is selected
+    setSelectedEdgeId(null);
+    setSelectedId(idToUse);
+  
+    const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
+      ? ref.current.getNodes?.().find((nn) => nn.id === idToUse) ?? null
+      : (nodes.find((n) => n.id === idToUse) ?? null);
+  
+    const fallbackUpdated = nodes.find((n) => n.id === idToUse) ?? null;
+    onNodeSelect?.(updated ?? fallbackUpdated ?? null);
+  });
 
     return idToUse;
   }, [nodes, onNodeSelect, ref]);
@@ -265,17 +268,20 @@ const NodeCanvas = forwardRef(function NodeCanvas(
             })
           );
 
-          // notify after update
-          requestAnimationFrame(() => {
-            setSelectedId(id);
-            const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
-              ? ref.current.getNodes?.()?.find((nn) => nn.id === id) ?? null
-              : nodes.find((nn) => nn.id === id) ?? null;
-            if (updated) {
-              onNodeSelect?.(updated);
-              onNodeChange?.(updated);
-            }
-          });
+          // notify after update — ensure single-selection: clear any selected edge when selecting a node
+            requestAnimationFrame(() => {
+                setSelectedEdgeId(null);
+                setSelectedId(id);
+            
+                const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
+                ? ref.current.getNodes?.()?.find((nn) => nn.id === id) ?? null
+                : nodes.find((nn) => nn.id === id) ?? null;
+            
+                if (updated) {
+                onNodeSelect?.(updated);
+                onNodeChange?.(updated);
+                }
+            });
 
           return id;
         },
@@ -781,6 +787,9 @@ const NodeCanvas = forwardRef(function NodeCanvas(
                   style={{ cursor: "pointer", pointerEvents: "stroke" }}
                   onPointerDown={(ev) => {
                     ev.stopPropagation();
+                    // ensure only the edge is selected — clear any node selection and notify parent
+                    setSelectedId(null);
+                    onNodeSelect?.(null);
                     setSelectedEdgeId(edge.id);
                     // do not remove automatically; parent may show controls
                   }}
