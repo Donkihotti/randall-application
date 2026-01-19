@@ -45,6 +45,12 @@ export default function Page() {
   const [referenceUrls, setReferenceUrls] = useState([]);
   const [showNewNodePanel, setShowNewNodePanel] = useState(false);
 
+  //center canvas viewport refs
+  const lastEditedNodeRef = useRef(null);     // tracks last selected/edited node id
+  const centerDebounceRef = useRef(null);     // timer id for debounced centering
+  const CENTER_DEBOUNCE_MS = 220;
+  const CANVAS_READY_TIMEOUT = 3000;
+
   // Node + canvas refs + selections
   const pollRef = useRef(null); // retained for small cases but polling is via hook
   const nodeChangeTimersRef = useRef(new Map());
@@ -358,6 +364,19 @@ export default function Page() {
     });
   };
 
+  // last edited helper
+
+  async function addNodeAndMarkEdited(nodeArgs = {}) {
+    try {
+      const id = await addNodeViaQueue(nodeArgs);
+      if (id) lastEditedNodeRef.current = id;
+      return id;
+    } catch (err) {
+      console.warn("addNodeAndMarkEdited failed", err);
+      return null;
+    }
+  }
+
   // ===== Prediction (create) helpers (uses lib/api wrapper) =====
   function isValidId(id) {
     return typeof id === "string" && id.trim().length > 0 && id !== "undefined" && id !== "null";
@@ -388,6 +407,116 @@ export default function Page() {
   // fetchPrediction wrapper delegates to lib/api wrapper (supports AbortSignal)
   async function fetchPrediction(id, { signal } = {}) {
     return await fetchPredictionApi(id, { signal });
+  }
+
+  // center to last edited node (DB canonical) after hydration finishes
+useEffect(() => {
+  if (hydrating) return;
+  // only run when we have a project
+  if (!currentProjectId) return;
+
+  let mounted = true;
+  (async () => {
+    try {
+      // query the DB for the most recently updated node in this project
+      const { data: latest = [], error } = await supabase
+        .from("nodes")
+        .select("id")
+        .eq("project_id", currentProjectId)
+        .order("updated_at", { ascending: false })
+        .limit(1);
+
+      if (error) {
+        console.warn("Could not fetch latest node for centering", error);
+      } else if (mounted && latest && latest[0] && latest[0].id) {
+        const lastId = latest[0].id;
+        // Also update local lastEditedRef so subsequent local edits are tracked
+        lastEditedNodeRef.current = lastId;
+        await centerOnNodeId(lastId, { animate: true });
+      } else {
+        // fallback: if hydration added nodes to canvas, pick last canvas node
+        await centerOnNodeId(lastEditedNodeRef.current ?? null, { animate: true });
+      }
+    } catch (err) {
+      // swallow errors — not critical UX
+      console.warn("Center-after-hydration failed", err);
+      try { await centerOnNodeId(lastEditedNodeRef.current ?? null, { animate: true }); } catch (e) {}
+    }
+  })();
+
+  return () => { mounted = false; };
+}, [hydrating, currentProjectId]);
+
+
+  // NodeCanvas center viewport on open helper
+  async function ensureCanvasReady({ timeoutMs = CANVAS_READY_TIMEOUT, intervalMs = 40 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (nodeCanvasRef.current && typeof nodeCanvasRef.current.getNodes === "function" && typeof nodeCanvasRef.current.centerOnNode === "function") {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return !!(nodeCanvasRef.current && typeof nodeCanvasRef.current.centerOnNode === "function");
+  }
+
+  async function centerOnNodeId(nodeId, { animate = true, timeoutMs = 2500, intervalMs = 60 } = {}) {
+    if (!nodeId) return false;
+    const ready = await ensureCanvasReady();
+    if (!ready) return false;
+  
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const nodes = nodeCanvasRef.current?.getNodes?.() ?? [];
+        if (nodes.some(n => n.id === nodeId)) {
+          try {
+            nodeCanvasRef.current?.centerOnNode?.(nodeId, { animate });
+            return true;
+          } catch (err) {
+            console.warn("centerOnNodeId: center call failed", err);
+            return false;
+          }
+        }
+      } catch (e) {
+        // retry if canvas still initializing
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  
+    // fallback: center last available node
+    try {
+      const nodes = nodeCanvasRef.current?.getNodes?.() ?? [];
+      if (nodes.length) {
+        nodeCanvasRef.current?.centerOnNode?.(nodes[nodes.length - 1].id, { animate });
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  async function centerOnPreferredNode({ animate = true } = {}) {
+    // priority: explicitly selected node, then last edited, then last node in canvas
+    const preferId = selectedNode?.id ?? lastEditedNodeRef.current ?? null;
+  
+    if (preferId) {
+      const ok = await centerOnNodeId(preferId, { animate });
+      if (ok) return true;
+    }
+  
+    // fallback: wait for canvas and center last node
+    const ready = await ensureCanvasReady({ timeoutMs: CANVAS_READY_TIMEOUT });
+    if (!ready) return false;
+  
+    const nodes = nodeCanvasRef.current?.getNodes?.() ?? [];
+    if (nodes && nodes.length) {
+      const last = nodes[nodes.length - 1];
+      try {
+        nodeCanvasRef.current?.centerOnNode?.(last.id, { animate });
+        return true;
+      } catch (err) {}
+    }
+    return false;
   }
 
   // ===== Node helpers & UI-level helpers (kept in-page because they manipulate UI state) =====
@@ -596,7 +725,7 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
     });
   }  
 
-  function addEmptyNode({ position = null, width = null, height = null } = {}) {
+  async function addEmptyNode({ position = null, width = null, height = null } = {}) {
     // derive width/height from ratio if not provided
     let w = width;
     let h = height;
@@ -617,15 +746,7 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
     if (!pos) pos = getCanvasCenterTopLeft(w, h);
   
     // Create a new empty image node (explicit data.type ensures consistent behavior)
-    addNodeViaQueue({
-      image: null,
-      prompt: "",
-      model: "",
-      position: pos,
-      width: w,
-      height: h,
-      data: { type: "image", status: "empty" },
-    });
+    await addNodeAndMarkEdited({ image: null, prompt: "", model: "", position: pos, width: w, height: h });
   }  
 
   // Flush the hook's pending queue once the canvas is ready or hydration changes.
@@ -679,6 +800,9 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
 
   // ===== Debounced node persistence (handleNodeChange) kept in-page =====
   const handleNodeChange = useCallback((node) => {
+
+    lastEditedNodeRef.current = node?.id ?? lastEditedNodeRef.current
+
     if (suppressNodeChangeRef.current) return;
     if (!currentProjectId || !node?.id) return;
     if (!isUuid(node.id)) return;
@@ -793,7 +917,7 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
   }, [currentProjectId]);
 
   // --- ADD / REPLACE: apply aspect-ratio changes when the ratio panel or selection changes ---
-// LOCK: do NOT change nodes that already have an image (except to attach missing aspect metadata)
+  // LOCK: do NOT change nodes that already have an image (except to attach missing aspect metadata)
 useEffect(() => {
   const ratio = panelValues.ratio?.selected;
   if (!ratio) return;
@@ -898,7 +1022,30 @@ useEffect(() => {
     setTimeout(() => setSelectedNode(node), 0);
   }, []);
 
+  const handleEdgeRemove = useCallback(async (edge) => {
+    if (!edge) return;
+    // local immediate removal (canvas)
+    try {
+      nodeCanvasRef.current?.removeEdge?.(edge.id);
+    } catch (e) {}
   
+    // try to persist to server if we have a project
+    if (!currentProjectId) return;
+    try {
+      // Best-effort delete. The server route can handle edgeId OR source/target payload.
+      const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ edgeId: edge.id, sourceNode: edge.sourceId, targetNode: edge.targetId }),
+      });
+      if (!res.ok) {
+        // server may expect other semantics; log and continue (canvas already updated)
+        console.warn("Edge delete failed on server", res.status, await res.text().catch(() => ""));
+      }
+    } catch (err) {
+      console.warn("Failed to delete edge on server", err);
+    }
+  }, [currentProjectId]);  
 
   // ===== Generate flow (UI entry point) =====
 
@@ -987,7 +1134,7 @@ async function handleGenerate(e) {
                   const nodeRow = res.node;
                   const canonical = res.storagePath ?? nodeRow?.data?.image ?? null;
                   if (canonical) nodeStoragePathRef.current.set(nodeRow.id, normalizeStoragePath(canonical));
-                  await addNodeViaQueue({
+                  await addNodeAndMarkEdited({
                     id: nodeRow.id,
                     image: res.signedUrl ?? null,
                     prompt: nodeRow.data?.prompt ?? "",
@@ -1057,7 +1204,7 @@ async function handleGenerate(e) {
                 });
 
                 if (res?.node) {
-                  await addNodeViaQueue({
+                  await addNodeAndMarkEdited({
                     id: nodeRow.id,
                     image: res.signedUrl ?? null,
                     prompt: nodeRow.data?.prompt ?? "",
@@ -1198,12 +1345,13 @@ async function handleGenerate(e) {
                 </div>
 
                 <NodeCanvas
-                  ref={nodeCanvasRef}
-                  onNodeSelect={handleNodeSelect}
-                  onNodeChange={handleNodeChange}
-                  onEdgeCreate={handleEdgeCreate}
-                  onNodeRemove={handleNodeRemove}
-                />
+                ref={nodeCanvasRef}
+                onNodeSelect={handleNodeSelect}
+                onNodeChange={handleNodeChange}
+                onEdgeCreate={handleEdgeCreate}
+                onEdgeRemove={handleEdgeRemove}
+                onNodeRemove={handleNodeRemove}
+              />
               </div>
             </div>
           </div>

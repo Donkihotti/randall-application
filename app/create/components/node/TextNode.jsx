@@ -1,70 +1,31 @@
 // components/node/TextNode.jsx
 "use client";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState, useEffect } from "react";
+import ConnectPort from "./ConnectPort";
 
 /**
- * TextNode - lightweight presentational text node with editable content and connection ports.
- *
+ * TextNode — simple textarea-based text node.
  * Props:
- *  - node: { id, data: { text, type, ... }, width, height, ... }
+ *  - node: { id, x, y, width, height, data: { text, type, ... } }
  *  - isSelected: boolean
- *  - onCommit(newText) -> called when user finishes editing (blur or Enter)
- *  - onStartConnection(ev, node, port) -> (port: 'output'|'input')
+ *  - onCommit(newText)
+ *  - onStartConnection(ev, node, port)
  *  - onRemove(id)
- *  - sourcePreview: { type: 'image'|'text', src?: string } | null
+ *  - sourcePreview: { type: "image"|"text", src? }
  */
-export default function TextNode({
-  node,
-  isSelected = false,
-  onCommit,
-  onStartConnection,
-  onRemove,
-  sourcePreview = null,
-}) {
-  const textRef = useRef(null);
-  const [value, setValue] = useState(() => (node?.data?.text ?? ""));
-  const lastNodeTextRef = useRef(node?.data?.text ?? "");
+export default function TextNode({ node, isSelected = false, onCommit, onStartConnection, onRemove, sourcePreview = null }) {
+  const { data = {} } = node;
+  const initial = typeof data.text === "string" ? data.text : "";
+  const [text, setText] = useState(initial);
+  const [isHovering, setIsHovering] = useState(false);
 
   useEffect(() => {
-    const nText = node?.data?.text ?? "";
-    if (nText !== lastNodeTextRef.current) {
-      lastNodeTextRef.current = nText;
-      setValue(nText);
-      if (textRef.current && textRef.current.textContent !== nText) {
-        textRef.current.textContent = nText;
-      }
+    // when external updates happen, reflect them
+    if (data && typeof data.text === "string" && data.text !== text) {
+      setText(data.text);
     }
-  }, [node?.data?.text, node?.id]);
-
-  useEffect(() => {
-    if (isSelected && textRef.current) {
-      textRef.current.focus();
-      const range = document.createRange();
-      range.selectNodeContents(textRef.current);
-      range.collapse(false);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-    }
-  }, [isSelected]);
-
-  function commit() {
-    const txt = (textRef.current?.textContent ?? "").trim();
-    lastNodeTextRef.current = txt;
-    setValue(txt);
-    if (typeof onCommit === "function") onCommit(txt);
-  }
-
-  function onKeyDown(e) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      commit();
-      textRef.current?.blur?.();
-    } else if (e.key === "Escape") {
-      if (textRef.current) textRef.current.textContent = lastNodeTextRef.current || "";
-      textRef.current?.blur?.();
-    }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.text]);
 
   const portStyleBase = {
     position: "absolute",
@@ -79,30 +40,39 @@ export default function TextNode({
     userSelect: "none",
   };
 
+  const handleCommit = () => {
+    const trimmed = typeof text === "string" ? text : "";
+    if (typeof onCommit === "function") onCommit(trimmed);
+  };
+
   return (
+    <>
     <div
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => setIsHovering(false)}
       style={{
         width: "100%",
         height: "100%",
-        padding: 6,
-        boxSizing: "border-box",
-        borderRadius: 6,
-        background: "#0b0b0b",
-        color: "#e6e6e6",
         display: "flex",
-        alignItems: "stretch",
-        position: "relative",
+        flexDirection: "column",
+        borderRadius: 8,
         overflow: "hidden",
+        userSelect: "text",
+        position: "relative",
       }}
+      className="bg-main"
       data-node-id={node.id}
     >
-      {/* input port — centered vertically */}
+      {/* INPUT PORT */}
       <div
         data-port="input"
-        onPointerDown={(e) => { e.stopPropagation(); /* we don't start connections from input by default */ }}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          // keep pointer events
+        }}
         style={{
           ...portStyleBase,
-          left: -8,
+          left: -7,
           top: "50%",
           transform: "translateY(-50%)",
           background: "#fff",
@@ -110,35 +80,38 @@ export default function TextNode({
         }}
         title="Input port"
       >
-        <div style={{ width: 6, height: 6, borderRadius: 3, background: "#9ca3af" }} />
       </div>
 
-      {/* editable text area */}
-      <div
-        ref={textRef}
-        contentEditable
-        suppressContentEditableWarning
-        onInput={(e) => setValue(e.currentTarget.textContent ?? "")}
-        onBlur={commit}
-        onKeyDown={onKeyDown}
-        style={{
-          width: "100%",
-          height: "100%",
-          outline: isSelected ? "1px solid #ACACAC" : "none",
-          paddingLeft: 6,
-          paddingRight: 6,
-          overflow: "auto",
-          whiteSpace: "pre-wrap",
-          fontSize: 13,
-          lineHeight: "1.2",
-        }}
-        role="textbox"
-        aria-multiline="true"
-      >
-        {value}
+      {/* Text area */}
+      <div style={{ flex: 1, padding: 8, display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch", justifyContent: "flex-start" }}>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={handleCommit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              // commit on Ctrl+Enter
+              handleCommit();
+            }
+          }}
+          placeholder="Type prompt text"
+          style={{
+            width: "100%",
+            height: "100%",
+            resize: "none",
+            border: "none",
+            outline: "none",
+            background: "transparent",
+            color: "#fff",
+            direction: "ltr", // ensure normal typing direction
+            fontSize: 13,
+            lineHeight: 1.3,
+            fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
+          }}
+        />
       </div>
 
-      {/* output port — centered vertically */}
+      {/* OUTPUT PORT */}
       <div
         data-port="output"
         onPointerDown={(e) => {
@@ -159,9 +132,16 @@ export default function TextNode({
         <div style={{ width: 7, height: 7, borderRadius: 3.5, background: "#3b82f6" }} />
       </div>
 
-      {/* small source preview badge (if connected) */}
+      {/* Hover prompt preview */}
+      {isHovering && data?.text && (
+        <div style={{ position: "absolute", left: 6, bottom: 6, zIndex: 60, background: "#fff", padding: 6, borderRadius: 6, boxShadow: "0 1px 6px rgba(0,0,0,0.12)" }}>
+          <div style={{ maxWidth: 140, fontSize: 12, color: "#111" }}>{data.text}</div>
+        </div>
+      )}
+
+      {/* source preview (image or T badge) */}
       {sourcePreview && (
-        <div style={{ position: "absolute", left: 6, bottom: 6, width: 36, height: 36, borderRadius: 4, overflow: "hidden", zIndex: 60 }}>
+        <div style={{ position: "absolute", left: 6, bottom: 6, width: 45, height: 45, borderRadius: 2, overflow: "hidden", zIndex: 60, boxShadow: "0 1px 4px rgba(0,0,0,0.35)" }}>
           {sourcePreview.type === "image" ? (
             <img src={sourcePreview.src} alt="source" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
           ) : (
@@ -171,28 +151,7 @@ export default function TextNode({
           )}
         </div>
       )}
-
-      {/* optional small remove button top-right (parent can also render a remove control) */}
-      <button
-        type="button"
-        onClick={() => onRemove?.(node.id)}
-        title="Remove node"
-        style={{
-          position: "absolute",
-          right: 6,
-          top: 6,
-          width: 20,
-          height: 20,
-          borderRadius: 4,
-          background: "transparent",
-          color: "#aaa",
-          border: "none",
-          cursor: "pointer",
-          zIndex: 70,
-        }}
-      >
-        ×
-      </button>
     </div>
+    </>
   );
 }

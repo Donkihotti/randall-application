@@ -18,7 +18,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const toFixedNum = (n) => Number(n.toFixed(2));
 
 const NodeCanvas = forwardRef(function NodeCanvas(
-  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove },
+  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove },
   ref
 ) {
   const containerRef = useRef(null);
@@ -26,6 +26,7 @@ const NodeCanvas = forwardRef(function NodeCanvas(
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState(null);
 
   const [scale, setScale] = useState(1);
   const [translate, setTranslate] = useState({ x: 0, y: 0 });
@@ -85,6 +86,42 @@ const NodeCanvas = forwardRef(function NodeCanvas(
     const h = Math.max(minH, Math.ceil(maxY + padding));
     setWorldSize({ w, h });
   }, [nodes]);
+
+ // keyboard handler useEffect to delete the selected edge when the user presses Delete/Backspace
+  useEffect(() => {
+    const isTypingInEditable = () => {
+      const el = document.activeElement;
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return true;
+      if (el.isContentEditable) return true;
+      return false;
+    };
+  
+    const onKeyDownEdge = (e) => {
+      if (e.isComposing) return;
+      if ((e.key === "Delete" || e.key === "Backspace") && !isTypingInEditable()) {
+        if (selectedEdgeId) {
+          // notify parent with edge object (find it)
+          const edgeObj = edges.find((ed) => ed.id === selectedEdgeId);
+          if (edgeObj) {
+            try {
+              setEdges(prev => prev.filter((ed) => ed.id !== selectedEdgeId));
+              onEdgeRemove?.(edgeObj);
+            } catch (err) {
+              console.warn("Failed to remove edge locally", err);
+            } finally {
+              setSelectedEdgeId(null);
+            }
+          }
+        }
+      }
+    };
+  
+    window.addEventListener("keydown", onKeyDownEdge);
+    return () => window.removeEventListener("keydown", onKeyDownEdge);
+  }, [selectedEdgeId, edges, onEdgeRemove]);
+  
 
   // ---------- imperative API ----------
   useImperativeHandle(
@@ -266,58 +303,107 @@ addImageNode({
           return id;
         },
   
-        addEdge({ sourceId, targetId }) {
-          if (!sourceId || !targetId) return null;
-          // ensure nodes exist
-          const srcExists = nodes.some((n) => n.id === sourceId);
-          const tgtExists = nodes.some((n) => n.id === targetId);
-          if (!srcExists || !tgtExists) {
-            console.warn("addEdge: source or target does not exist", { sourceId, targetId });
-            return null;
-          }
-          // avoid duplicates
-          const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
-          if (exists) return null;
-          const edgeId = uid("edge_");
-          setEdges((prev) => {
-            const created = { id: edgeId, sourceId, targetId };
-            // also inform parent
-            onEdgeCreate?.(created);
-            return [...prev, created];
-          });
-          return edgeId;
-        },
+        addEdge({ id: providedEdgeId = null, sourceId, targetId } = {}) {
+            if (!sourceId || !targetId) return null;
+            // ensure nodes exist
+            const srcExists = nodes.some((n) => n.id === sourceId);
+            const tgtExists = nodes.some((n) => n.id === targetId);
+            if (!srcExists || !tgtExists) {
+              console.warn("addEdge: source or target does not exist", { sourceId, targetId });
+              return null;
+            }
+            // avoid duplicates
+            const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
+            if (exists) return null;
+          
+            const edgeId = providedEdgeId || uid("edge_");
+            setEdges((prev) => {
+              const created = { id: edgeId, sourceId, targetId };
+              // also inform parent (server create will be handled by outer code)
+              onEdgeCreate?.(created);
+              return [...prev, created];
+            });
+            return edgeId;
+          },
+            
+          removeEdge(edgeId) {
+            if (!edgeId) return;
+            setEdges((prev) => prev.filter((e) => e.id !== edgeId));
+            // if this edge was selected, clear selection
+            setSelectedEdgeId((prev) => (prev === edgeId ? null : prev));
+          },
   
-        removeNode(id) {
-          if (!id) return;
-          const wasSelected = selectedId === id;
+          removeNode(id) {
+            if (!id) return;
+            const wasSelected = selectedId === id;
+          
+            setNodes((prev) => prev.filter((n) => n.id !== id));
+            setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
+            setSelectedId((prev) => (prev === id ? null : prev));
+            // also clear selected edge if it referenced this node
+            setSelectedEdgeId((prev) => {
+              if (!prev) return null;
+              const stillExists = edges.some((ed) => ed.id === prev && ed.sourceId !== id && ed.targetId !== id);
+              return stillExists ? prev : null;
+            });
+          
+            if (wasSelected) {
+              setTimeout(() => {
+                onNodeSelect?.(null);
+              }, 0);
+            }
+            return id;
+          },
+          
+          getNodes() {
+            return nodes;
+          },
+          
+          getEdges() {
+            return edges;
+          },
   
-          setNodes((prev) => prev.filter((n) => n.id !== id));
-          setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
-          setSelectedId((prev) => (prev === id ? null : prev));
-  
-          if (wasSelected) {
-            setTimeout(() => {
-              onNodeSelect?.(null);
-            }, 0);
-          }
-          return id;
-        },
-  
-        getNodes() {
-          return nodes;
-        },
-  
-        getEdges() {
-          return edges;
-        },
-  
-        clear() {
-          setNodes([]);
-          setEdges([]);
-          setSelectedId(null);
-          requestAnimationFrame(() => onNodeSelect?.(null));
-        },
+          getViewCenterWorld,
+          centerOnNode(nodeId, { animate = false } = {}) {
+            try {
+              const node = nodes.find((n) => n.id === nodeId);
+              if (!node || !containerRef.current) return;
+              const rect = containerRef.current.getBoundingClientRect();
+              const centerClientX = rect.left + rect.width / 2;
+              const centerClientY = rect.top + rect.height / 2;
+          
+              // compute desired translate so node is centered in view
+              const desiredTranslateX = centerClientX - (node.x + node.width / 2) * scale - rect.left;
+              const desiredTranslateY = centerClientY - (node.y + node.height / 2) * scale - rect.top;
+          
+              if (animate) {
+                // simple animation: ease into new translate with requestAnimationFrame
+                const start = { ...translate };
+                const end = { x: desiredTranslateX, y: desiredTranslateY };
+                const dur = 220;
+                const t0 = performance.now();
+                const step = (now) => {
+                  const p = Math.min(1, (now - t0) / dur);
+                  const eased = p * (2 - p);
+                  setTranslate({ x: start.x + (end.x - start.x) * eased, y: start.y + (end.y - start.y) * eased });
+                  if (p < 1) requestAnimationFrame(step);
+                };
+                requestAnimationFrame(step);
+              } else {
+                setTranslate({ x: desiredTranslateX, y: desiredTranslateY });
+              }
+            } catch (e) {
+              // ignore
+            }
+          },
+          
+          clear() {
+            setNodes([]);
+            setEdges([]);
+            setSelectedId(null);
+            setSelectedEdgeId(null);
+            requestAnimationFrame(() => onNodeSelect?.(null));
+          },
   
         // expose view-center helper for external callers (optional convenience)
         getViewCenterWorld,
@@ -670,12 +756,63 @@ addImageNode({
       >
         <div style={worldStyle}>
           <svg width={svgWidth} height={svgHeight} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }}>
-            {edges.map((edge) => {
-              const s = nodes.find((n) => n.id === edge.sourceId);
-              const t = nodes.find((n) => n.id === edge.targetId);
-              if (!s || !t) return null;
-              const d = getEdgePath(s, t);
-              return <path key={edge.id} d={d} stroke="#2E2E2E" strokeWidth={2} fill="none" strokeLinecap="round" />;
+          {edges.map((edge) => {
+            const s = nodes.find((n) => n.id === edge.sourceId);
+            const t = nodes.find((n) => n.id === edge.targetId);
+            if (!s || !t) return null;
+            const d = getEdgePath(s, t);
+            const isSelectedEdge = selectedEdgeId === edge.id;
+
+            // visible stroke (thin)
+            const visible = (
+                <path
+                key={`vis-${edge.id}`}
+                d={d}
+                stroke={isSelectedEdge ? "#ACACAC" : "#2E2E2E"}
+                strokeWidth={isSelectedEdge ? 2 : 2}
+                fill="none"
+                strokeLinecap="round"
+                style={{ pointerEvents: "none" }}
+                />
+            );
+
+            // pointer-capture stroke (invisible but wide) for reliable hit-testing
+            const picker = (
+                <path
+                key={`pick-${edge.id}`}
+                d={d}
+                stroke="transparent"
+                strokeWidth={16}
+                fill="none"
+                strokeLinecap="round"
+                style={{ cursor: "pointer", pointerEvents: "stroke" }}
+                onPointerDown={(ev) => {
+                    ev.stopPropagation();
+                    setSelectedEdgeId(edge.id);
+                    // notify parent selection if needed
+                    if (typeof onEdgeCreate === "function") {
+                    // no-op: keep original onEdgeCreate for creation; add onEdgeSelect prop if you want
+                    }
+                }}
+                onDoubleClick={(ev) => {
+                    // double-click to remove quickly (also Delete key supported)
+                    ev.stopPropagation();
+                    // remove locally and inform parent to persist removal
+                    try {
+                    setEdges(prev => prev.filter(e => e.id !== edge.id));
+                    onEdgeRemove?.(edge);
+                    setSelectedEdgeId(null);
+                    } catch (e) {}
+                }}
+                />
+            );
+
+            return (
+                <g key={`edge-group-${edge.id}`}>
+                {visible}
+                {picker}
+                </g>
+            );
             })}
             {connectingRef.current && (
               <path d={getTempPath()} stroke="#D9D9D9" opacity={0.9} strokeWidth={2} fill="none" strokeDasharray="6 6" strokeLinecap="round" />
@@ -741,6 +878,7 @@ addImageNode({
 
                 <div style={{ width: "100%", height: "100%" }}>
                     {looksLikeText ? (
+                    <>
                     <TextNode
                         node={node}
                         isSelected={isSelected}
@@ -763,6 +901,7 @@ addImageNode({
                         }
                         }}
                     />
+                    </>
                     ) : (
                     <ImageNode
                         node={node}
