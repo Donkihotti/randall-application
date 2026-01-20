@@ -867,68 +867,105 @@ const NodeCanvas = forwardRef(function NodeCanvas(
             const looksLikeText = explicitType === "text" || (!explicitType && node?.data?.text && !node?.data?.image);
 
             return (
-              <div
-                key={node.id}
-                style={wrapperStyle}
-                onPointerDown={(e) => onNodePointerDown(e, node)}
-                onPointerUp={(e) => { try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch (_) {} }}
-              >
-                <div style={{
-                  position: "absolute",
-                  inset: 0,
-                  pointerEvents: "none",
-                  borderRadius: 6,
-                  boxShadow: isSelected ? "0 0 0 1px #ACACAC" : "none",
-                }} />
-
-                <div style={{ width: "100%", height: "100%" }}>
-                  {looksLikeText ? (
-                    <TextNode
-                      node={node}
-                      isSelected={isSelected}
-                      sourcePreview={sourcePreview}
-                      onCommit={(newText) => {
-                        try {
-                          // prefer imperative API update
-                          ref.current?.updateNode?.(node.id, { data: { ...(node.data || {}), text: newText } });
-                        } catch (err) {
-                          setNodes((prev) => prev.map((n) => n.id === node.id ? { ...n, data: { ...(n.data || {}), text: newText } } : n));
-                          onNodeChange?.({ ...node, data: { ...(node.data || {}), text: newText } });
-                        }
-                      }}
-                      onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
-                      onRemove={(id) => {
-                        if (onNodeRemove) onNodeRemove(id);
-                        else {
-                          setNodes(prev => prev.filter(n => n.id !== id));
-                          setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
-                          if (selectedId === id) { setSelectedId(null); onNodeSelect?.(null); }
-                        }
-                      }}
+                <div
+                  key={node.id}
+                  style={{
+                    ...wrapperStyle,
+                    overflow: "visible",
+                  }}
+                  onPointerDown={(e) => onNodePointerDown(e, node)}
+                  onPointerUp={(e) => { try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch (_) {} }}
+                >
+                  <div
+                    aria-hidden="true"
+                    className="flex flex-row items-center gap-x-1.5 ml-1"
+                    style={{
+                      position: "absolute",
+                      top: -23,
+                      left: "10%",
+                      transform: "translateX(-50%)",
+                      zIndex: 1200,
+                      pointerEvents: "none",
+                      whiteSpace: "nowrap",
+                      fontSize: 14,
+                      lineHeight: "12px",
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      color: "#6F6F6F",
+                    }}
+                  >
+                     <img
+                    src={looksLikeText ? "/Text_Align_Left.svg" : "/Image_02.svg"}
+                    alt={looksLikeText ? "Text node" : "Image node"}
+                    width={14}
+                    height={14}
+                    style={{ display: "block", pointerEvents: "none" }}
                     />
-                  ) : (
-                    <ImageNode
-                      node={node}
-                      isSelected={isSelected}
-                      sourcePreview={sourcePreview}
-                      onRemove={(id) => {
-                        if (onNodeRemove) {
-                          onNodeRemove(id);
-                        } else {
-                          setNodes(prev => prev.filter(n => n.id !== id));
-                          setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
-                          if (selectedId === id) {
-                            setSelectedId(null);
-                            onNodeSelect?.(null);
+                    {looksLikeText
+                      ? (typeof node.data?.text === "string" && node.data.text.length > 0
+                        ? (node.data.text.length > 30 ? node.data.text.slice(0, 30) + "…" : node.data.text)
+                        : "Text")
+                      : (node.data?.image ? "Image" : "Image")
+                    }
+                  </div>
+              
+                  <div
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      borderRadius: 8,
+                      overflow: "hidden",
+                      position: "relative",
+                      boxShadow: isSelected ? "0 0 0 2px #ACACAC" : "none",
+                      background: "#fff",
+                    }}
+                  >
+                    {looksLikeText ? (
+                      <TextNode
+                        node={node}
+                        isSelected={isSelected}
+                        sourcePreview={sourcePreview}
+                        onCommit={(newText) => {
+                          try {
+                            ref.current?.updateNode?.(node.id, { data: { ...(node.data || {}), text: newText } });
+                          } catch (err) {
+                            setNodes((prev) => prev.map((n) => n.id === node.id ? { ...n, data: { ...(n.data || {}), text: newText } } : n));
+                            onNodeChange?.({ ...node, data: { ...(node.data || {}), text: newText } });
                           }
-                        }
-                      }}
-                      onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
-                    />
-                  )}
+                        }}
+                        onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
+                        onRemove={(id) => {
+                          if (onNodeRemove) onNodeRemove(id);
+                          else {
+                            setNodes(prev => prev.filter(n => n.id !== id));
+                            setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
+                            if (selectedId === id) { setSelectedId(null); onNodeSelect?.(null); }
+                          }
+                        }}
+                      />
+                    ) : (
+                      <ImageNode
+                        node={node}
+                        isSelected={isSelected}
+                        sourcePreview={sourcePreview}
+                        onRemove={(id) => {
+                          if (onNodeRemove) {
+                            onNodeRemove(id);
+                          } else {
+                            setNodes(prev => prev.filter(n => n.id !== id));
+                            setEdges(prev => prev.filter((ed) => ed.sourceId !== id && ed.targetId !== id));
+                            if (selectedId === id) {
+                              setSelectedId(null);
+                              onNodeSelect?.(null);
+                            }
+                          }
+                        }}
+                        onStartConnection={(ev, nd, port) => startConnection(ev, nd, port)}
+                      />
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
+              );              
           })}
         </div>
       </div>

@@ -81,8 +81,8 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
             draggable={false}
           />
         ) : (
-          <div style={{ textAlign: "center", fontSize: 12, padding: 8 }} className="bg-main">
-            {status === "generating" ? "Generating…" : "Empty node — create image"}
+          <div style={{ textAlign: "center", fontSize: 12, padding: 8, color: '#6F6F6F' }} className="bg-main">
+            {status === "generating" ? "Generating…" : ""}
           </div>
         )}
       </div>

@@ -103,7 +103,7 @@ export default function TextNode({ node, isSelected = false, onCommit, onStartCo
             outline: "none",
             background: "transparent",
             color: "#fff",
-            direction: "ltr", // ensure normal typing direction
+            direction: "ltr", 
             fontSize: 13,
             lineHeight: 1.3,
             fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
