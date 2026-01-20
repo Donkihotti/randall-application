@@ -849,55 +849,74 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
   }, [currentProjectId]);
 
   // ---- Edge create ----
-  const handleEdgeCreate = useCallback(async (edge) => {
-    if (!currentProjectId || !edge) return;
-    const { sourceId, targetId } = edge;
-    if (!sourceId || !targetId) return;
-    if (!isUuid(sourceId) || !isUuid(targetId)) {
-      console.debug("Skipping server edge create until both node IDs are server UUIDs", edge);
+  // page.js — handleEdgeCreate (replace existing)
+const handleEdgeCreate = useCallback(async (edge) => {
+  if (!currentProjectId || !edge) return;
+  const { sourceId, targetId } = edge;
+  if (!sourceId || !targetId) return;
+  if (!isUuid(sourceId) || !isUuid(targetId)) {
+    // wait until both endpoints have server UUIDs
+    console.debug("Skipping server edge create until both node IDs are server UUIDs", edge);
+    return;
+  }
+
+  const key = edgeKey(sourceId, targetId);
+  if (createdEdgesRef.current.has(key)) return;
+  if (creatingEdgesRef.current.has(key)) return;
+
+  try {
+    const existingEdges = new Set((nodeCanvasRef.current?.getEdges?.() || []).map(e => `${e.sourceId}__${e.targetId}`));
+    if (existingEdges.has(key)) {
+      createdEdgesRef.current.add(key);
+      return;
+    }
+  } catch (err) {}
+
+  creatingEdgesRef.current.add(key);
+  try {
+    // POST to create edge server-side
+    const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceNode: sourceId, targetNode: targetId }),
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      console.warn("Failed to persist edge", res.status, txt);
       return;
     }
 
-    const key = edgeKey(sourceId, targetId);
-    if (createdEdgesRef.current.has(key)) return;
-    if (creatingEdgesRef.current.has(key)) return;
+    const payload = await res.json().catch(() => ({}));
+    const serverEdge = payload?.edge ?? null;
 
+    // Now we must reconcile client canvas edge(s) with serverEdge
+    // The canvas may have a local temporary edge id (edge.id) — replace it with serverEdge.id
     try {
-      const existingEdges = new Set((nodeCanvasRef.current?.getEdges?.() || []).map(e => `${e.sourceId}__${e.targetId}`));
-      if (existingEdges.has(key)) {
-        createdEdgesRef.current.add(key);
-        return;
+      const canvasEdges = nodeCanvasRef.current?.getEdges?.() || [];
+      // find a matching local edge by endpoints
+      const local = canvasEdges.find(e => e.sourceId === sourceId && e.targetId === targetId);
+      if (local) {
+        // remove the local edge (id like edge_...)
+        nodeCanvasRef.current?.removeEdge?.(local.id);
       }
-    } catch (err) {}
-
-    creatingEdgesRef.current.add(key);
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceNode: sourceId, targetNode: targetId }),
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        console.warn("Failed to persist edge", res.status, txt);
-        return;
-      }
-      await res.json().catch(() => ({}));
-      createdEdgesRef.current.add(key);
-
-      try {
-        const canvasEdges = nodeCanvasRef.current?.getEdges?.() || [];
-        const already = canvasEdges.some(e => (e.sourceId === sourceId && e.targetId === targetId));
-        if (!already && nodeCanvasRef.current?.addEdge) nodeCanvasRef.current.addEdge({ sourceId, targetId });
-      } catch (err) {
-        console.warn("Failed to add edge to local canvas after server create", err);
+      // add server-side edge id into canvas (use provided id so future deletes use the UUID)
+      if (serverEdge && serverEdge.id) {
+        nodeCanvasRef.current?.addEdge?.({ id: serverEdge.id, sourceId, targetId });
+      } else {
+        // fallback: add edge with the server-provided object or generated id if missing
+        nodeCanvasRef.current?.addEdge?.({ sourceId, targetId });
       }
     } catch (err) {
-      console.warn("Failed to persist edge", err);
-    } finally {
-      creatingEdgesRef.current.delete(key);
+      console.warn("Failed to reconcile canvas edge with server edge", err);
     }
-  }, [currentProjectId]);
+
+    createdEdgesRef.current.add(key);
+  } catch (err) {
+    console.warn("Failed to persist edge", err);
+  } finally {
+    creatingEdgesRef.current.delete(key);
+  }
+}, [currentProjectId]);
 
   // server-side delete
   const handleNodeRemove = useCallback(async (nodeId) => {
@@ -1021,44 +1040,43 @@ useEffect(() => {
     setTimeout(() => setSelectedNode(node), 0);
   }, []);
 
-const handleEdgeDelete = useCallback(async (edge) => {
-  if (!edge) return false;
-  // optimistically remove from canvas
+// page.js — handleEdgeRemove (replace existing)
+const handleEdgeRemove = useCallback(async (edge) => {
+  if (!edge) return;
+  // local immediate removal (canvas)
   try {
-    if (edge.id) {
-      nodeCanvasRef.current?.removeEdge?.(edge.id);
-    } else if (edge.sourceId && edge.targetId) {
-      nodeCanvasRef.current?.removeEdgeByEndpoints?.({ sourceId: edge.sourceId, targetId: edge.targetId });
+    // remove locally first for immediate UX
+    if (edge?.id && nodeCanvasRef.current?.removeEdge) {
+      nodeCanvasRef.current.removeEdge(edge.id);
+    } else if (edge?.sourceId && edge?.targetId && nodeCanvasRef.current?.removeEdgeByEndpoints) {
+      nodeCanvasRef.current.removeEdgeByEndpoints({ sourceId: edge.sourceId, targetId: edge.targetId });
     }
-  } catch (err) {
-    console.warn("Local edge remove failed", err);
-  }
+  } catch (e) {}
 
-  // persist server-side when project present
-  if (!currentProjectId) return true;
+  // If no project / server, nothing else to do
+  if (!currentProjectId) return;
+
   try {
-    // Prefer RESTful URL with edge id; fallback to endpoints body when id missing
-    if (edge.id) {
+    // If edge.id looks like a UUID -> prefer deleting by id
+    if (isUuid(edge.id)) {
       const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges/${encodeURIComponent(edge.id)}`, { method: "DELETE" });
       if (!res.ok) {
-        console.warn("Edge delete failed on server", await res.text().catch(() => ""));
+        console.warn("Edge delete failed by id", res.status, await res.text().catch(() => ""));
       }
-      return res.ok;
-    } else {
-      // server route that accepts source/target in body
-      const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceNode: edge.sourceId, targetNode: edge.targetId }),
-      });
-      if (!res.ok) {
-        console.warn("Edge delete by endpoints failed on server", await res.text().catch(() => ""));
-      }
-      return res.ok;
+      return;
+    }
+
+    // Otherwise, delete by endpoints (sourceNode/targetNode). The API route supports this.
+    const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceNode: edge.sourceId, targetNode: edge.targetId }),
+    });
+    if (!res.ok) {
+      console.warn("Edge delete failed by endpoints", res.status, await res.text().catch(() => ""));
     }
   } catch (err) {
-    console.warn("handleEdgeDelete error", err);
-    return false;
+    console.warn("Failed to delete edge on server", err);
   }
 }, [currentProjectId]);
 
@@ -1363,7 +1381,7 @@ async function handleGenerate(e) {
                 onNodeSelect={handleNodeSelect}
                 onNodeChange={handleNodeChange}
                 onEdgeCreate={handleEdgeCreate}
-                onEdgeRemove={handleEdgeDelete} 
+                onEdgeRemove={handleEdgeRemove} 
                 onNodeRemove={handleNodeRemove}
               />
               </div>
