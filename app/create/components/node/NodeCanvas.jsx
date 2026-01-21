@@ -460,13 +460,37 @@ const NodeCanvas = forwardRef(function NodeCanvas(
   // ---------- global pointer handlers ----------
   useEffect(() => {
     const onPointerMove = (e) => {
-      if (connectingRef.current) {
+      // inside onPointerMove(...)
+    if (connectingRef.current) {
+        // raw world under pointer
         const w = clientToWorld({ clientX: e.clientX, clientY: e.clientY });
-        setConnectingTargetWorld(w);
-        const hit = nodeAtWorld(w.x, w.y);
-        setConnectHoverNode(hit?.id ?? null);
+    
+        // snapping behavior: prefer to snap to the nearest port within pixel radius
+        const SNAP_PIXELS = 20; // pixel distance threshold
+        let snappedWorld = w;
+        let snappedNode = null;
+    
+        // convert candidate port world coords to client to compute pixel distance reliably
+        for (let i = 0; i < nodes.length; i++) {
+        const cand = nodes[i];
+        if (!cand || cand.id === connectingRef.current.sourceId) continue; // skip source node
+        // we want to snap to the input port (left side) for target
+        const portWorld = getPortWorld(cand, "input");
+        const portClient = worldToClient(portWorld);
+        const dx = e.clientX - (portClient.clientX ?? 0);
+        const dy = e.clientY - (portClient.clientY ?? 0);
+        const dist = Math.hypot(dx, dy);
+        if (dist <= SNAP_PIXELS) {
+            snappedWorld = portWorld;
+            snappedNode = cand;
+            break; // first match is fine (nodes are not ordered by z; that's acceptable)
+        }
+        }
+    
+        setConnectingTargetWorld(snappedWorld);
+        setConnectHoverNode(snappedNode?.id ?? null);
         return;
-      }
+        }  
 
       if (draggingRef.current) {
         const d = draggingRef.current;
@@ -522,25 +546,53 @@ const NodeCanvas = forwardRef(function NodeCanvas(
 
     const onPointerUp = (e) => {
       // finish connect
-      if (connectingRef.current) {
-        const w = clientToWorld({ clientX: e.clientX, clientY: e.clientY });
-        const hit = nodeAtWorld(w.x, w.y);
-        const sourceId = connectingRef.current.sourceId;
-        if (hit && hit.id !== sourceId) {
-          const newEdge = { id: uid("edge_"), sourceId, targetId: hit.id };
-          setEdges((prev) => {
-            const exists = prev.some(ed => ed.sourceId === sourceId && ed.targetId === hit.id);
-            if (exists) return prev;
-            // notify parent
-            onEdgeCreate?.(newEdge);
-            return [...prev, newEdge];
-          });
-        }
-        connectingRef.current = null;
-        setConnectingTargetWorld(null);
-        setConnectHoverNode(null);
-        return;
+      // finish connect
+if (connectingRef.current) {
+    const w = clientToWorld({ clientX: e.clientX, clientY: e.clientY });
+  
+    // Re-run snap detection at pointer-up to be robust (same threshold)
+    const SNAP_PIXELS_UP = 60;
+    let hitNode = null;
+  
+    // First, prefer snap-to-port (client pixel distance)
+    for (let i = 0; i < nodes.length; i++) {
+      const cand = nodes[i];
+      if (!cand || cand.id === connectingRef.current.sourceId) continue;
+      const portWorld = getPortWorld(cand, "input");
+      const portClient = worldToClient(portWorld);
+      const dx = e.clientX - (portClient.clientX ?? 0);
+      const dy = e.clientY - (portClient.clientY ?? 0);
+      const dist = Math.hypot(dx, dy);
+      if (dist <= SNAP_PIXELS_UP) {
+        hitNode = cand;
+        break;
       }
+    }
+  
+    // Fallback to nodeAtWorld if no snap found
+    if (!hitNode) {
+      const hit = nodeAtWorld(w.x, w.y);
+      if (hit && hit.id !== connectingRef.current.sourceId) hitNode = hit;
+    }
+  
+    const sourceId = connectingRef.current.sourceId;
+    if (hitNode && hitNode.id !== sourceId) {
+      const newEdge = { id: uid("edge_"), sourceId, targetId: hitNode.id };
+      setEdges((prev) => {
+        const exists = prev.some(ed => ed.sourceId === sourceId && ed.targetId === hitNode.id);
+        if (exists) return prev;
+        // notify parent
+        onEdgeCreate?.(newEdge);
+        return [...prev, newEdge];
+      });
+    }
+  
+    connectingRef.current = null;
+    setConnectingTargetWorld(null);
+    setConnectHoverNode(null);
+    return;
+  }
+  
 
       // finish drag -> snap
       if (draggingRef.current) {
