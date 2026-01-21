@@ -51,25 +51,35 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
       }}
       data-node-id={node.id}
     >
-      {/* LEFT (input) port — CENTERED vertically */}
-      <div
-        data-port="input"
-        onPointerDown={(e) => {
-          // We don't start connections from the input by default, but keep pointer events.
-          e.stopPropagation();
-        }}
-        style={{
-          ...portStyleBase,
-          left: -8,
-          top: "50%",
-          transform: "translateY(-50%)",
-          background: "#fff",
-          border: "2px solid rgba(15,23,42,0.06)",
-        }}
-        title="Input port"
-      >
-        <div style={{ width: 6, height: 6, borderRadius: 3, background: "#9ca3af" }} />
-      </div>
+     {/* INPUT port (left) */}
+<div
+  role="button"
+  aria-label="Input port"
+  onPointerDown={(ev) => {
+    ev.stopPropagation();
+    // If you want clicking the port to start connecting *to* this node,
+    // call parent onStartConnection? Typically startConnection is for outputs,
+    // so input might be used for dropping; adapt if your logic differs.
+  }}
+  style={{
+    position: "absolute",
+    left: -10,            // 5px outside node body + hit area
+    top: "50%",
+    transform: "translateY(-50%)",
+    width: 14,
+    height: 14,
+    borderRadius: 999,
+    background: "#fff",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    zIndex: 1500,
+  }}
+>
+  <div style={{ width: 6, height: 6, borderRadius: 999, background: "#2E2E2E" }} />
+</div>
 
       {/* image area */}
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", }} className="bg-main">

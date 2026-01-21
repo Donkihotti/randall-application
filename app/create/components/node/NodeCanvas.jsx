@@ -159,6 +159,9 @@ const NodeCanvas = forwardRef(function NodeCanvas(
           if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) initData.type = "text";
           if (initData.image) initData.status = initData.status ?? "done"; else initData.status = initData.status ?? "empty";
           const node = { id: idToUse, x: pos.x, y: pos.y, width, height, data: initData };
+          if (node.data?.type === "text") {
+            node.height = node.width; // lock to 1:1 at creation
+            }   
           return [...prev, node];
         }
       } else {
@@ -173,6 +176,9 @@ const NodeCanvas = forwardRef(function NodeCanvas(
         if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) initData.type = "text";
         if (initData.image) initData.status = initData.status ?? "done"; else initData.status = initData.status ?? "empty";
         const node = { id: idToUse, x: pos.x, y: pos.y, width, height, data: initData };
+        if (node.data?.type === "text") {
+            node.height = node.width; // lock to 1:1 at creation
+        }
         return [...prev, node];
       }
     });
@@ -214,10 +220,18 @@ const NodeCanvas = forwardRef(function NodeCanvas(
         },
 
         // add a text node — forward `data` and ensure `type: "text"`
-        addTextNode({ id = null, text = "", position = null, width = 260, height = 120, data = {} } = {}) {
-          const mergedData = { ...(data || {}), type: data?.type ?? "text", text: typeof text !== "undefined" ? text : (data?.text ?? ""), status: data?.status ?? (text ? "done" : "empty") };
-          return addOrUpdateNode({ id, position, width, height, data: mergedData });
-        },
+        addTextNode({ id = null, text = "", position = null, width = 260, height = null, data = {} } = {}) {
+            // enforce 1:1: use provided width, or fallback to 260
+            const w = Math.max(80, width || 260);
+            const h = Math.round(height ?? w);
+            const mergedData = {
+              ...(data || {}),
+              type: data?.type ?? "text",
+              text: (typeof text !== "undefined" ? text : (data?.text ?? "")),
+              status: data?.status ?? (text ? "done" : "empty"),
+            };
+            return addOrUpdateNode({ id, position, width: w, height: h, data: mergedData });
+          },
 
         // add an image node — forward `data` but do not overwrite an existing data.type
         addImageNode({
@@ -259,32 +273,45 @@ const NodeCanvas = forwardRef(function NodeCanvas(
         },
 
         updateNode(id, patch = {}) {
-          setNodes((prev) =>
-            prev.map((n) => {
-              if (n.id !== id) return n;
-              const merged = { ...n, ...patch };
-              merged.data = { ...(n.data || {}), ...(patch.data || {}) };
-              return merged;
-            })
-          );
-
-          // notify after update — ensure single-selection: clear any selected edge when selecting a node
+            setNodes((prev) =>
+              prev.map((n) => {
+                if (n.id !== id) return n;
+                // apply shallow merges (preserve fields not provided in patch)
+                const merged = { ...n, ...patch };
+                merged.data = { ...(n.data || {}), ...(patch.data || {}) };
+          
+                // If this node is (or becomes) a text node, enforce square size.
+                const isText = (n.data?.type === "text") || (merged.data?.type === "text");
+                if (isText) {
+                  // choose size: honor explicit patch.width or patch.height if present, otherwise keep existing
+                  const requested = (typeof patch.width === "number" ? patch.width : (typeof patch.height === "number" ? patch.height : n.width));
+                  const size = Math.round(Math.max(80, requested || n.width || n.height || 260));
+                  merged.width = size;
+                  merged.height = size;
+                } else {
+                  // non-text nodes: apply width/height if provided (preserve otherwise)
+                  if (typeof patch.width === "number") merged.width = patch.width;
+                  if (typeof patch.height === "number") merged.height = patch.height;
+                }
+          
+                return merged;
+              })
+            );
+          
+            // notify after update
             requestAnimationFrame(() => {
-                setSelectedEdgeId(null);
-                setSelectedId(id);
-            
-                const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
+              setSelectedId(id);
+              const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
                 ? ref.current.getNodes?.()?.find((nn) => nn.id === id) ?? null
                 : nodes.find((nn) => nn.id === id) ?? null;
-            
-                if (updated) {
+              if (updated) {
                 onNodeSelect?.(updated);
                 onNodeChange?.(updated);
-                }
+              }
             });
-
-          return id;
-        },
+          
+            return id;
+          },
 
         addEdge({ id: providedEdgeId = null, sourceId, targetId } = {}) {
           if (!sourceId || !targetId) return null;
