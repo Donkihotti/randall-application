@@ -936,62 +936,68 @@ const handleEdgeCreate = useCallback(async (edge) => {
 
   // --- ADD / REPLACE: apply aspect-ratio changes when the ratio panel or selection changes ---
   // LOCK: do NOT change nodes that already have an image (except to attach missing aspect metadata)
+// --- Apply aspect ratio changes only when the user changes the ratio control ---
+// Only act when panelValues.ratio.selected actually changes (not when selection changes)
+const prevRatioRef = useRef(panelValues.ratio?.selected);
+
 useEffect(() => {
   const ratio = panelValues.ratio?.selected;
   if (!ratio) return;
-  if (!selectedNode?.id) return;
 
-  // If node already has an image, do NOT resize it — but ensure data.aspect exists so we know what it was at creation
-  const hasImage = Boolean(selectedNode?.data?.image);
-  if (hasImage) {
-    try {
-      const existing = selectedNode?.data ?? {};
+  // Only proceed when the ratio actually changed (skip initial mount / selection-only changes)
+  if (prevRatioRef.current === ratio) {
+    return;
+  }
+  prevRatioRef.current = ratio;
+
+  // If there's no selected node, nothing to update; we don't auto-resize nodes on selection.
+  const targetNode = selectedNode ?? null;
+  if (!targetNode?.id) return;
+
+  try {
+    const hasImage = Boolean(targetNode?.data?.image);
+
+    // If node already has an image, do not resize it — only attach aspect metadata if missing
+    if (hasImage) {
+      const existing = targetNode?.data ?? {};
       if (!existing.aspect) {
         const parts0 = ratio.split(":").map(Number);
         if (parts0.length === 2 && !parts0.some(isNaN)) {
-          // attach aspect into node data and persist (handleNodeChange will persist only for server uuid nodes)
-          const updated = { ...selectedNode, data: { ...existing, aspect: ratio } };
+          const updated = { ...targetNode, data: { ...existing, aspect: ratio } };
           setSelectedNode(updated);
-          // call handleNodeChange to persist (it has guards for non-UUID IDs and is debounced)
-          try { handleNodeChange?.(updated); } catch (e) { /* ignore synchronous errors */ }
+          try { handleNodeChange?.(updated); } catch (e) { /* ignore */ }
         }
       }
-    } catch (e) {
-      // noop
+      return;
     }
-    return;
-  }
 
-  // Node has no image -> we are allowed to change size to reflect new aspect
-  const parts = ratio.split(":").map((p) => Number(p));
-  if (parts.length !== 2 || parts.some(isNaN)) return;
-  const [wR, hR] = parts;
-  if (wR <= 0 || hR <= 0) return;
+    // Node has no image -> we are allowed to change size to reflect new aspect.
+    const parts = ratio.split(":").map((p) => Number(p));
+    if (parts.length !== 2 || parts.some(isNaN)) return;
+    const [wR, hR] = parts;
+    if (wR <= 0 || hR <= 0) return;
 
-  // base width (prefer existing width)
-  const baseWidth = Math.max(80, selectedNode.width || 260);
-  const newWidth = Math.round(Math.max(80, baseWidth));
-  const newHeight = Math.round(Math.max(80, (baseWidth * (hR / wR))));
+    // base width (prefer existing width)
+    const baseWidth = Math.max(80, targetNode.width || 260);
+    const newWidth = Math.round(Math.max(80, baseWidth));
+    const newHeight = Math.round(Math.max(80, (baseWidth * (hR / wR))));
 
-  try {
     // update node size AND attach aspect to node.data so handleNodeChange can persist it
-    const newData = { ...(selectedNode.data || {}), aspect: ratio };
-    // update canvas visually
-    nodeCanvasRef.current?.updateNode?.(selectedNode.id, { width: newWidth, height: newHeight, data: newData });
+    const newData = { ...(targetNode.data || {}), aspect: ratio };
 
-    // read back the updated node from canvas (if available) and persist via handleNodeChange
-    const updated = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === selectedNode.id) ?? null;
+    nodeCanvasRef.current?.updateNode?.(targetNode.id, { width: newWidth, height: newHeight, data: newData });
+
+    const updated = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === targetNode.id) ?? null;
     if (updated) {
-      // ensure data contains aspect
       updated.data = { ...(updated.data || {}), aspect: ratio };
-      // persist (debounced) and update local selection
       handleNodeChange?.(updated);
       setSelectedNode(updated);
     }
   } catch (err) {
     console.warn("Failed to update node size for ratio change", err);
   }
-}, [panelValues.ratio?.selected, selectedNode?.id, handleNodeChange]);
+}, [panelValues.ratio?.selected, handleNodeChange, selectedNode?.id]); // selectedNode?.id included only to be able to read latest selection
+
 
   // Keep page mode in sync with the selected node (but don't override while generating)
   useEffect(() => {
