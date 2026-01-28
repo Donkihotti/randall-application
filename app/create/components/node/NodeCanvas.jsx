@@ -18,7 +18,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const toFixedNum = (n) => Number(n.toFixed(2));
 
 const NodeCanvas = forwardRef(function NodeCanvas(
-  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove },
+  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, panelValues },
   ref
 ) {
   const containerRef = useRef(null);
@@ -899,7 +899,7 @@ if (connectingRef.current) {
               );
             })}
             {connectingRef.current && (
-              <path d={getTempPath()} stroke="#D9D9D9" opacity={0.9} strokeWidth={2} fill="none" strokeDasharray="6 6" strokeLinecap="round" />
+              <path d={getTempPath()} stroke="#D9D9D9" opacity={0.9} strokeWidth={2} fill="none"  />
             )}
           </svg>
 
@@ -957,22 +957,21 @@ if (connectingRef.current) {
                 >
                   <div
                     aria-hidden="true"
-                    className="flex flex-row items-center gap-x-1.5 ml-1"
+                    className="flex flex-row items-cente justify-between gap-x-1.5 ml-1 relative w-full"
                     style={{
                       position: "absolute",
                       top: -23,
-                      left: "10%",
-                      transform: "translateX(-50%)",
                       zIndex: 1200,
                       pointerEvents: "none",
                       whiteSpace: "nowrap",
                       fontSize: 14,
                       lineHeight: "12px",
-                      padding: "2px 8px",
+                      padding: "2px 2px",
                       borderRadius: 999,
                       color: "#6F6F6F",
                     }}
                   >
+                    <div className="flex flex-row items-center gap-x-1">
                      <img
                     src={looksLikeText ? "/Text_Align_Left.svg" : "/Image_02.svg"}
                     alt={looksLikeText ? "Text node" : "Image node"}
@@ -986,6 +985,8 @@ if (connectingRef.current) {
                         : "Text")
                       : (node.data?.image ? "Image" : "Image")
                     }
+                    </div>
+                    <span className="mr-2">Model</span>
                   </div>
               
                   <div

@@ -1,6 +1,6 @@
 // components/node/ImageNode.jsx
 import React, { useState } from "react";
-
+import ButtonGenerateRound from "../ButtonGenerateRound";
 /**
  * Presentational ImageNode — does NOT position itself.
  * Props:
@@ -118,11 +118,8 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
         <div style={{ width: 7, height: 7, borderRadius: 3.5, background: "#3b82f6" }} />
       </div>
       { isHovering && ( 
-        <div className="w-24 h-4 bg-white">
-            <p className="text-black">{prompt}</p>
-        </div>
-      )}
-      {sourcePreview && (
+        <div className="w-24 flex flex-row">
+             {sourcePreview && (
         <div style={{ position: "absolute", left: 6, bottom: 6, width: 45, height: 45, borderRadius: 2, overflow: "hidden", zIndex: 60, boxShadow: "0 1px 4px rgba(0,0,0,0.35)" }}>
           {sourcePreview.type === "image" ? (
             <img src={sourcePreview.src} alt="source" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
@@ -131,6 +128,9 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
               T
             </div>
           )}
+        </div>
+      )}
+        <ButtonGenerateRound className="absolute bottom-1.5 right-1.5"/>
         </div>
       )}
     </div>
