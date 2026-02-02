@@ -1,6 +1,6 @@
 // components/node/TextNode.jsx
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import ConnectPort from "./ConnectPort";
 
 /**
@@ -13,7 +13,7 @@ import ConnectPort from "./ConnectPort";
  *  - onRemove(id)
  *  - sourcePreview: { type: "image"|"text", src? }
  */
-export default function TextNode({ node, isSelected = false, onCommit, onStartConnection, onRemove, sourcePreview = null }) {
+export default function TextNode({ node, isSelected = false, onCommit, onStartConnection, onRemove, sourcePreview = null, portPositions = {} }) {
   const { data = {} } = node;
   const initial = typeof data.text === "string" ? data.text : "";
   const [text, setText] = useState(initial);
@@ -29,14 +29,13 @@ export default function TextNode({ node, isSelected = false, onCommit, onStartCo
 
   const portStyleBase = {
     position: "absolute",
-    width: 16,
-    height: 16,
+    width: 10,
+    height: 10,
     borderRadius: 8,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     zIndex: 30,
-    boxSizing: "border-box",
     userSelect: "none",
   };
 
@@ -55,7 +54,7 @@ export default function TextNode({ node, isSelected = false, onCommit, onStartCo
         height: "100%",
         display: "flex",
         flexDirection: "column",
-        borderRadius: 8,
+        borderRadius: 2,
         overflow: "hidden",
         userSelect: "text",
         position: "relative",
@@ -132,14 +131,12 @@ export default function TextNode({ node, isSelected = false, onCommit, onStartCo
         <div style={{ width: 7, height: 7, borderRadius: 3.5, background: "#3b82f6" }} />
       </div>
 
-      {/* Hover prompt preview */}
       {isHovering && data?.text && (
         <div style={{ position: "absolute", left: 6, bottom: 6, zIndex: 60, background: "#fff", padding: 6, borderRadius: 6, boxShadow: "0 1px 6px rgba(0,0,0,0.12)" }}>
-          <div style={{ maxWidth: 140, fontSize: 12, color: "#111" }}>{data.text}</div>
+         
         </div>
       )}
 
-      {/* source preview (image or T badge) */}
       {sourcePreview && (
         <div style={{ position: "absolute", left: 6, bottom: 6, width: 45, height: 45, borderRadius: 2, overflow: "hidden", zIndex: 60, boxShadow: "0 1px 4px rgba(0,0,0,0.35)" }}>
           {sourcePreview.type === "image" ? (

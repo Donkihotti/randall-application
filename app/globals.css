@@ -63,7 +63,7 @@
 
 @theme inline {
   --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-foreground: var(--landing-main);
 
   /*=====FONTS=====*/
 
@@ -121,7 +121,8 @@
   --text-small: var(--sidemenu-text);
   --text-supersmall: var(--text-smallest);
   --text-paragraph: var(--text-medium);
-  --text-medium-plus: var(--text-normal);
+  --text-medium-plus: var(--subhead);
+  --text-landing: var(--landing-small); 
 
 /*=====PADDING======*/
 
@@ -131,7 +132,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #121212;
+    --background: #ffff;
+    --landing-main: #0000;
     --foreground: #ededed;
     --offgray: #242424; 
 
@@ -172,9 +174,10 @@
     --sidemenu-text: 14px; 
     --header: 64px;
     --header-2: 40px;
-    --text-normal: 24px; 
+    --subhead: 24px; 
     --text-smallest: 12px; 
     --text-medium: 14px; 
+    --landing-small: 16px; 
 
     --padding-page: 24px; 
     --padding-small: 12px; 

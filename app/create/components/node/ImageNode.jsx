@@ -23,8 +23,8 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
 
   const portStyleBase = {
     position: "absolute",
-    width: 16,
-    height: 16,
+    width: 10,
+    height: 10,
     borderRadius: 8,
     display: "flex",
     alignItems: "center",
@@ -44,7 +44,7 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
         display: "flex",
         flexDirection: "column",
         background: "#fff",
-        borderRadius: 8,
+        borderRadius: 2,
         overflow: "hidden",
         userSelect: "none",
         position: "relative", 
@@ -63,11 +63,11 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
   }}
   style={{
     position: "absolute",
-    left: -10,            // 5px outside node body + hit area
+    left: -10,            
     top: "50%",
     transform: "translateY(-50%)",
-    width: 14,
-    height: 14,
+    width: 12,
+    height: 12,
     borderRadius: 999,
     background: "#fff",
     boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
@@ -110,7 +110,7 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
           top: "50%",
           transform: "translateY(-50%)",
           background: "#e6eefc",
-          border: "1px solid rgba(59,130,246,0.6)",
+          border: "1px solid rgba(0,0,0,0.4)",
           cursor: "crosshair",
         }}
         title="Start connection"

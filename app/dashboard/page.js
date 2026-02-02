@@ -26,7 +26,7 @@ export default function Dashboard () {
   }, []);
 
   return (
-    <div style={{ padding: 16 }}>
+    <div className="p-4 bg-black">
     <h1>Projects</h1>
     <div className="w-full mt-8">
       <CreateProjectButton />

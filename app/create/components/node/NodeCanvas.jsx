@@ -18,7 +18,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const toFixedNum = (n) => Number(n.toFixed(2));
 
 const NodeCanvas = forwardRef(function NodeCanvas(
-  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, panelValues },
+  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, panelModel },
   ref
 ) {
   const containerRef = useRef(null);
@@ -150,12 +150,16 @@ const NodeCanvas = forwardRef(function NodeCanvas(
           return prev.map((n) => n.id === idToUse ? { ...n, x: pos.x, y: pos.y, width, height, data: mergedData } : n);
         } else {
           // will append with provided id
-          const initData = {
-            ...(data || {}),
-            ...(typeof image !== "undefined" && image !== null ? { image } : {}),
-            ...(typeof prompt !== "undefined" ? { prompt } : {}),
-            ...(typeof model !== "undefined" ? { model } : {}),
-          };
+          const resolvedModel2 = (typeof model !== "undefined")
+          ? model
+          : (data?.model ?? panelModel ?? undefined);
+
+        const initData = {
+          ...(data || {}),
+          ...(typeof image !== "undefined" && image !== null ? { image } : {}),
+          ...(typeof prompt !== "undefined" ? { prompt } : {}),
+          ...(typeof resolvedModel2 !== "undefined" ? { model: resolvedModel2 } : {}),
+        };
           if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) initData.type = "text";
           if (initData.image) initData.status = initData.status ?? "done"; else initData.status = initData.status ?? "empty";
           const node = { id: idToUse, x: pos.x, y: pos.y, width, height, data: initData };
@@ -167,11 +171,15 @@ const NodeCanvas = forwardRef(function NodeCanvas(
       } else {
         // create new id and append
         idToUse = uid();
+        const resolvedModel = (typeof model !== "undefined")
+          ? model
+          : (data?.model ?? panelModel ?? undefined);
+
         const initData = {
           ...(data || {}),
           ...(typeof image !== "undefined" && image !== null ? { image } : {}),
           ...(typeof prompt !== "undefined" ? { prompt } : {}),
-          ...(typeof model !== "undefined" ? { model } : {}),
+          ...(typeof resolvedModel !== "undefined" ? { model: resolvedModel } : {}),
         };
         if (!initData.type && typeof initData.text === "string" && initData.text.length > 0) initData.type = "text";
         if (initData.image) initData.status = initData.status ?? "done"; else initData.status = initData.status ?? "empty";
@@ -829,11 +837,6 @@ if (connectingRef.current) {
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative", touchAction: "none" }}>
-      <div style={{ position: "absolute", right: 2, bottom: 2, zIndex: 60, display: "flex", gap: 6 }}>
-        <button onClick={() => { const n = clamp(scale * 1.25, MIN_SCALE, MAX_SCALE); setScale(n); }} style={{ padding: "6px 8px" }}>+</button>
-        <button onClick={() => { const n = clamp(scale / 1.25, MIN_SCALE, MAX_SCALE); setScale(n); }} style={{ padding: "6px 8px" }}>−</button>
-      </div>
-
       <div
         ref={containerRef}
         tabIndex={0}
@@ -899,7 +902,7 @@ if (connectingRef.current) {
               );
             })}
             {connectingRef.current && (
-              <path d={getTempPath()} stroke="#D9D9D9" opacity={0.9} strokeWidth={2} fill="none"  />
+              <path d={getTempPath()} stroke="#D9D9D9" opacity={0.9} strokeWidth={2} fill="none" />
             )}
           </svg>
 
@@ -917,6 +920,18 @@ if (connectingRef.current) {
               zIndex: isSelected ? 1000 : 500,
               cursor: dragging ? "grabbing" : "grab",
             };
+
+            const displayModel = node?.data?.model ?? ((node?.data?.status === "empty" || !node?.data?.type || node?.data?.image == null) ? (panelModel ?? null) : null);
+            const truncateModel = (m) => {
+              if (!m) return null;
+              const s = String(m);
+              if (s.length <= 18) return s;
+              const tokens = s.split(/[-_]/);
+              const first = tokens[0] || s;
+              if (first.length <= 16) return first;
+              return s.slice(0, 15) + "…";
+            };
+            const modelLabel = truncateModel(displayModel);
 
             // Compute single incoming source preview
             let sourcePreview = null;
@@ -946,58 +961,66 @@ if (connectingRef.current) {
             const looksLikeText = explicitType === "text" || (!explicitType && node?.data?.text && !node?.data?.image);
 
             return (
-                <div
-                  key={node.id}
-                  style={{
-                    ...wrapperStyle,
-                    overflow: "visible",
-                  }}
-                  onPointerDown={(e) => onNodePointerDown(e, node)}
-                  onPointerUp={(e) => { try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch (_) {} }}
-                >
-                  <div
-                    aria-hidden="true"
-                    className="flex flex-row items-cente justify-between gap-x-1.5 ml-1 relative w-full"
-                    style={{
-                      position: "absolute",
-                      top: -23,
-                      zIndex: 1200,
-                      pointerEvents: "none",
-                      whiteSpace: "nowrap",
-                      fontSize: 14,
-                      lineHeight: "12px",
-                      padding: "2px 2px",
-                      borderRadius: 999,
-                      color: "#6F6F6F",
-                    }}
-                  >
-                    <div className="flex flex-row items-center gap-x-1">
-                     <img
-                    src={looksLikeText ? "/Text_Align_Left.svg" : "/Image_02.svg"}
-                    alt={looksLikeText ? "Text node" : "Image node"}
-                    width={14}
-                    height={14}
-                    style={{ display: "block", pointerEvents: "none" }}
-                    />
-                    {looksLikeText
-                      ? (typeof node.data?.text === "string" && node.data.text.length > 0
-                        ? (node.data.text.length > 30 ? node.data.text.slice(0, 30) + "…" : node.data.text)
+               <div
+                 key={node.id}
+                 style={{
+                   ...wrapperStyle,
+                   overflow: "visible",
+                 }}
+                 onPointerDown={(e) => onNodePointerDown(e, node)}
+                 onPointerUp={(e) => { try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch (_) {} }}
+               >
+                 <div
+              aria-hidden="true"
+              className="flex flex-row items-center justify-between gap-x-1.5 ml-1 relative w-full"
+              style={{
+                position: "absolute",
+                top: -23,
+                zIndex: 1200,
+                pointerEvents: "none",
+                whiteSpace: "nowrap",
+                fontSize: 14,
+                lineHeight: "12px",
+                padding: "2px 6px",
+                borderRadius: 999,
+                color: "#6F6F6F",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+             <div className="flex flex-row items-center gap-x-1" style={{ pointerEvents: "none" }}>
+               <img
+                 src={looksLikeText ? "/Text_Align_Left.svg" : "/Image_02.svg"}
+                 alt={looksLikeText ? "Text node" : "Image node"}
+                 width={14}
+                 height={14}
+                  style={{ display: "block", pointerEvents: "none" }}
+                />
+                <span style={{ pointerEvents: "none", maxWidth: 220,  textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "middle" }}>
+                  {looksLikeText
+                    ? (typeof node.data?.text === "string" && node.data.text.length > 0
+                        ? (node.data.text.length > 10 ? node.data.text.slice(0, 10) + "…" : node.data.text)
                         : "Text")
-                      : (node.data?.image ? "Image" : "Image")
-                    }
-                    </div>
-                    <span className="mr-2">Model</span>
-                  </div>
+                    : (node.data?.image ? "Image" : "Image")}
+                </span>
+              </div>
+
+              {modelLabel && (
+                <span className="mr-2">
+                  {modelLabel}
+                </span>
+              )}
+            </div>
               
                   <div
                     style={{
                       width: "100%",
                       height: "100%",
-                      borderRadius: 8,
+                      borderRadius: 2,
                       overflow: "hidden",
                       position: "relative",
-                      boxShadow: isSelected ? "0 0 0 2px #ACACAC" : "none",
-                      background: "#fff",
+                      boxShadow: isSelected ? "0 0 0 1px #ACACAC" : "none",    
                     }}
                   >
                     {looksLikeText ? (

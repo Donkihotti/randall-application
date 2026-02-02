@@ -364,8 +364,6 @@ export default function Page() {
     });
   };
 
-  // last edited helper
-
   async function addNodeAndMarkEdited(nodeArgs = {}) {
     try {
       const id = await addNodeViaQueue(nodeArgs);
@@ -375,6 +373,88 @@ export default function Page() {
       console.warn("addNodeAndMarkEdited failed", err);
       return null;
     }
+  }
+
+  const promotingLocalToServerRef = useRef(new Map());
+
+  async function promoteLocalNodeToServer(localNode) {
+    if (!localNode) return null;
+    if (!currentProjectId) return localNode.id;
+    if (isUuid(localNode.id)) return localNode.id;
+  
+    // Dedupe: if a promotion for this local id is already in-flight, wait for it
+    if (promotingLocalToServerRef.current.has(localNode.id)) {
+      try {
+        return await promotingLocalToServerRef.current.get(localNode.id);
+      } catch (e) {
+        promotingLocalToServerRef.current.delete(localNode.id);
+        // fall through to attempt create again
+      }
+    }
+  
+    const p = (async () => {
+      try {
+        const payload = {
+          x: Math.round(localNode.x ?? 120),
+          y: Math.round(localNode.y ?? 120),
+          width: Math.round(localNode.width ?? (localNode.data?.type === "text" ? 260 : 260)),
+          height: Math.round(localNode.height ?? (localNode.data?.type === "text" ? localNode.width ?? 260 : 180)),
+          data: { ...(localNode.data || {}) },
+        };
+  
+        // create server node via your API wrapper
+        const created = await createProjectNodeApi(currentProjectId, payload);
+        if (!created || !created.id) {
+          console.warn("promoteLocalNodeToServer: server create returned no id", created);
+          return localNode.id;
+        }
+        const serverId = created.id;
+  
+        // Remove local placeholder (best-effort)
+        try { nodeCanvasRef.current?.removeNode?.(localNode.id); } catch (e) { /* ignore */ }
+  
+        // Add server node to canvas via queue (keeps dedupe & hydrating logic)
+        try {
+          await addNodeViaQueue({
+            id: serverId,
+            image: created.data?.image ?? null,
+            prompt: created.data?.prompt ?? "",
+            model: created.data?.model ?? payload.data?.model ?? panelValues.model?.selected ?? "",
+            position: { x: created.x ?? payload.x, y: created.y ?? payload.y },
+            width: created.width ?? payload.width,
+            height: created.height ?? payload.height,
+            data: created.data ?? payload.data,
+          });
+        } catch (e) {
+          console.warn("promoteLocalNodeToServer: addNodeViaQueue failed", e);
+          // fallback to direct add
+          try {
+            nodeCanvasRef.current?.addImageNode?.({
+              id: serverId,
+              image: created.data?.image ?? null,
+              prompt: created.data?.prompt ?? "",
+              model: created.data?.model ?? payload.data?.model ?? panelValues.model?.selected ?? "",
+              position: { x: created.x ?? payload.x, y: created.y ?? payload.y },
+              width: created.width ?? payload.width,
+              height: created.height ?? payload.height,
+              data: created.data ?? payload.data,
+            });
+          } catch (err2) {
+            console.warn("promoteLocalNodeToServer fallback add failed", err2);
+          }
+        }
+  
+        // mark as added
+        addedNodeIdsRef.current.add(serverId);
+        lastEditedNodeRef.current = serverId;
+        return serverId;
+      } finally {
+        promotingLocalToServerRef.current.delete(localNode.id);
+      }
+    })();
+  
+    promotingLocalToServerRef.current.set(localNode.id, p);
+    return await p;
   }
 
   // ===== Prediction (create) helpers (uses lib/api wrapper) =====
@@ -610,11 +690,11 @@ async function addTextNodeAtCenter({ text = "" } = {}) {
   await addNodeAndMarkEdited({
     image: null,
     prompt: "",
-    model: "",
+    model: panelValues.model?.selected,
     position: pos,
     width: w,
     height: h,
-    data: { type: "text", text, status: text ? "done" : "empty" },
+    data: { type: "text", text, status: text ? "done" : "empty", model: panelValues.model?.selected },
   });
 
   setShowNewNodePanel(false);
@@ -718,9 +798,15 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
     addNodeViaQueue({
       image: imageUrl,
       prompt: promptText,
-      model: modelName,
+      model: modelName ?? panelValues.model?.selected,
       position: fallbackPos,
-      data: { type: "image", image: imageUrl, prompt: promptText, model: modelName, status: "done" },
+      data: {
+        type: "image",
+        image: imageUrl,
+        prompt: promptText,
+        model: modelName ?? panelValues.model?.selected,
+        status: "done",
+      },
     });
   }  
 
@@ -745,7 +831,15 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
     if (!pos) pos = getCanvasCenterTopLeft(w, h);
   
     // Create a new empty image node (explicit data.type ensures consistent behavior)
-    await addNodeAndMarkEdited({ image: null, prompt: "", model: "", position: pos, width: w, height: h });
+    await addNodeAndMarkEdited({
+      image: null,
+      prompt: "",
+      model: panelValues.model?.selected,
+      position: pos,
+      width: w,
+      height: h,
+      data: { type: "image", status: "empty", model: panelValues.model?.selected },
+    });
   }  
 
   // Flush the hook's pending queue once the canvas is ready or hydration changes.
@@ -997,6 +1091,105 @@ useEffect(() => {
     console.warn("Failed to update node size for ratio change", err);
   }
 }, [panelValues.ratio?.selected, handleNodeChange, selectedNode?.id]); // selectedNode?.id included only to be able to read latest selection
+
+// immediate persist of panel model to the selected node (replace previous model-effects)
+useEffect(() => {
+  const newModel = panelValues?.model?.selected ?? null;
+  if (!newModel) return;
+
+  const node = selectedNode ?? null;
+  if (!node || !node.id) return;
+
+  (async () => {
+    try {
+      // guard: if node already has a canonical image, do not overwrite as before
+      if (Boolean(node.data?.image)) {
+        // if you DO want to allow changing model for image nodes, remove this guard
+        return;
+      }
+
+      // promote local placeholder to server first if needed (so PATCH will succeed)
+      let targetId = node.id;
+      if (!isUuid(node.id) && currentProjectId) {
+        try {
+          targetId = await promoteLocalNodeToServer(node);
+        } catch (e) {
+          console.warn("promoteLocalNodeToServer failed while applying model", e);
+          // fallback: still try to update the local canvas node (will not persist)
+          targetId = node.id;
+        }
+      }
+
+      // Update the canvas immediately (UI)
+      nodeCanvasRef.current?.updateNode?.(targetId, {
+        data: { ...(node.data || {}), model: newModel },
+      });
+
+      // update UI state for immediate feedback
+      setSelectedNode((prev) => prev ? { ...prev, data: { ...(prev.data || {}), model: newModel } } : prev);
+
+      // Build dataToPersist exactly like handleNodeChange does:
+      const dataToPersist = { ...(node.data || {}), model: newModel };
+
+      // If we have a canonical mapping for image storage paths, prefer it
+      const canonical = nodeStoragePathRef.current.get(targetId);
+      if (canonical) {
+        dataToPersist.image = canonical;
+      } else {
+        if (typeof dataToPersist.image === "string") {
+          if (looksLikeAbsoluteUrl(dataToPersist.image) || looksLikeSignedUrl(dataToPersist.image)) {
+            // do not persist ephemeral URLs
+            delete dataToPersist.image;
+          } else if (canonicalStorageRegex.test(dataToPersist.image)) {
+            dataToPersist.image = normalizeStoragePath(dataToPersist.image);
+          } else {
+            delete dataToPersist.image;
+          }
+        }
+      }
+
+      // Prepare patch body
+      const patchBody = {
+        x: Math.round(node.x),
+        y: Math.round(node.y),
+        width: node.width,
+        height: node.height,
+        data: dataToPersist,
+      };
+
+      // Prevent the debounced handleNodeChange from also firing a patch immediately.
+      suppressNodeChangeRef.current = true;
+
+      // Send immediate PATCH to persist model change
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/nodes/${encodeURIComponent(targetId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patchBody),
+        });
+
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          console.warn("Failed to persist model change (PATCH)", res.status, txt);
+        } else {
+          // Optionally you can parse response and update nodeStoragePathRef if server returned canonical path
+          const payload = await res.json().catch(() => null);
+          const serverNode = payload?.node ?? payload;
+          if (serverNode?.data?.image) {
+            nodeStoragePathRef.current.set(serverNode.id || targetId, normalizeStoragePath(serverNode.data.image));
+          }
+        }
+      } catch (err) {
+        console.warn("Immediate PATCH for model change failed", err);
+      } finally {
+        // allow the debounced handler to run again after a short delay longer than the debounce
+        setTimeout(() => { suppressNodeChangeRef.current = false; }, 500);
+      }
+    } catch (err) {
+      console.warn("apply panel model to node failed", err);
+    }
+  })();
+}, [panelValues.model?.selected]); // only run when the panel model changes
 
 
   // Keep page mode in sync with the selected node (but don't override while generating)
@@ -1318,7 +1511,7 @@ async function handleGenerate(e) {
     <ProtectedRoute>
       <div className="page-root bg-bg grid grid-rows-12 grid-cols-12 h-screen">
         <section className="row-span-12 col-span-5 row-start-1 col-start-1 grid grid-cols-5 grid-rows-12 gap-2 p-2">
-          <div className="canvas col-span-5 row-span-8 bg-[#181818] rounded-md overflow-hidden">
+          <div className="canvas col-span-5 row-span-8 bg-[#101010] rounded-md overflow-hidden">
             <div className="w-full h-full">
               <div className="w-full h-full p-2 flex items-center justify-center relative">
                 <div className="flex items-center gap-2 z-50 absolute top-1 right-1">
@@ -1327,18 +1520,16 @@ async function handleGenerate(e) {
                       // ref={newNodePanelRef} fix this later!   
                       type="button"
                       onClick={() => setShowNewNodePanel((s) => !s)}
-                      className="button-icon px-2 text-medium flex flex-row items-center justify-center"
+                      className="button-icon p-2 text-medium flex flex-row items-center justify-center"
                       aria-label="Add node to canvas"
                       title="Add node"
                     >
                        <Image 
                           src={'/plus-icon.svg'}
-                          height={11}
-                          width={11}
+                          height={12}
+                          width={12}
                           alt="Image Icon"
-                          className="mr-2"
                           />
-                       node
                     </button>
 
                     {showNewNodePanel && (
@@ -1360,7 +1551,7 @@ async function handleGenerate(e) {
                           alt="Image Icon"
                           className="mr-2"
                           />
-                          Create image node
+                          Image node
                         </button>
 
                         <button
@@ -1375,7 +1566,7 @@ async function handleGenerate(e) {
                           alt="Text Icon"
                           className="mr-2"
                           />
-                          Create text node
+                          Text node
                         </button>
                       </div>
                     )}
@@ -1389,6 +1580,7 @@ async function handleGenerate(e) {
                 onEdgeCreate={handleEdgeCreate}
                 onEdgeRemove={handleEdgeRemove} 
                 onNodeRemove={handleNodeRemove}
+                panelModel={panelValues.model?.selected}
               />
               </div>
             </div>
