@@ -18,8 +18,8 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const toFixedNum = (n) => Number(n.toFixed(2));
 
 const NodeCanvas = forwardRef(function NodeCanvas(
-  { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, panelModel },
-  ref
+    { onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, panelModel, onContextMenuRequest },
+    ref
 ) {
   const containerRef = useRef(null);
 
@@ -40,6 +40,15 @@ const NodeCanvas = forwardRef(function NodeCanvas(
   const rafPanRef = useRef(null);
   const spacePressedRef = useRef(false);
 
+  const menuRef = useRef(null);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [contextMenuPos, setContextMenuPos] = useState({
+  clientX: 0,
+  clientY: 0,
+  worldX: 0,
+  worldY: 0,
+});
+
   const MIN_SCALE = 0.25;
   const MAX_SCALE = 3.5;
   const GRID_SIZE = 32;
@@ -47,7 +56,7 @@ const NodeCanvas = forwardRef(function NodeCanvas(
   const AUTO_PAN_MARGIN = 80;
   const AUTO_PAN_SPEED = 12;
 
-  const [worldSize, setWorldSize] = useState({ w: 3000, h: 2000 });
+  const [worldSize, setWorldSize] = useState({ w: 4000, h: 4000 });
 
   // ---------- coordinate helpers ----------
   const clientToWorld = useCallback(({ clientX, clientY }) => {
@@ -653,6 +662,78 @@ if (connectingRef.current) {
     onNodeSelect?.(node);
   };
 
+  const onContextMenu = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (!rect) return;
+      
+        // client coords relative to container (useful for placing DOM menus)
+        const clientX = Math.round(e.clientX - rect.left);
+        const clientY = Math.round(e.clientY - rect.top);
+      
+        // world coords (useful to position node)
+        const world = clientToWorld({ clientX: e.clientX, clientY: e.clientY });
+      
+        const payload = {
+          clientX,           // px inside container
+          clientY,
+          worldX: world.x,   // world coords in canvas
+          worldY: world.y,
+          originalEvent: e,
+        };
+      
+        // Prefer page-level handler. If provided, call it and return early
+        if (typeof onContextMenuRequest === "function") {
+          try { onContextMenuRequest(payload); } catch (err) { console.warn("onContextMenuRequest threw", err); }
+          return;
+        }
+  
+    setContextMenuPos({
+      clientX,
+      clientY,
+      worldX: world.x,
+      worldY: world.y,
+    });
+    setContextMenuOpen(true);
+  };
+  
+  // create a centered node at the stored world position
+  const createTextNodeAtContext = ({ width = 260, height = 260 } = {}) => {
+    const w = Math.max(80, width);
+    const h = Math.round(height ?? w);
+    const pos = { x: contextMenuPos.worldX - w / 2, y: contextMenuPos.worldY - h / 2 };
+  
+    // addOrUpdateNode is already defined in your file; use it directly
+    addOrUpdateNode({
+      image: undefined,
+      prompt: undefined,
+      position: pos,
+      width: w,
+      height: h,
+      data: { type: "text", text: "" },
+    });
+  
+    setContextMenuOpen(false);
+  };
+  
+  const createImageNodeAtContext = ({ width = 260, height = 180 } = {}) => {
+    const w = Math.max(80, width);
+    const h = Math.round(height ?? 180);
+    const pos = { x: contextMenuPos.worldX - w / 2, y: contextMenuPos.worldY - h / 2 };
+  
+    addOrUpdateNode({
+      image: null,
+      prompt: "",
+      position: pos,
+      width: w,
+      height: h,
+      data: { type: "image", status: "empty" },
+    });
+  
+    setContextMenuOpen(false);
+  };
+
   // ---------- canvas pointer down for panning ----------
   const onCanvasPointerDown = (e) => {
     // Always clear selections when the canvas background is clicked.
@@ -676,30 +757,76 @@ if (connectingRef.current) {
     panningRef.current = { startClientX: e.clientX, startClientY: e.clientY, originTranslate: { ...translate } };
   };
 
-  // ---------- wheel -> zoom handler (prevents browser zoom when ctrl/meta pressed) ----------
-  useEffect(() => {
+  // ---------- wheel -> zoom handler (ctrl/meta = zoom; otherwise trackpad pan) ----------
+useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+  
     const onWheel = (e) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
+      // Zoom when ctrl/meta pressed (keep existing behavior)
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const clientX = e.clientX;
+        const clientY = e.clientY;
+        const worldBefore = clientToWorld({ clientX, clientY });
+        const delta = -e.deltaY;
+        const factor = Math.exp(delta * 0.017);
+        const newScale = clamp(scale * factor, MIN_SCALE, MAX_SCALE);
+        setScale(newScale);
+        const cx = clientX - rect.left;
+        const cy = clientY - rect.top;
+        const newTranslateX = cx - worldBefore.x * newScale;
+        const newTranslateY = cy - worldBefore.y * newScale;
+        setTranslate({ x: newTranslateX, y: newTranslateY });
+        return;
+      }
+  
+      // Otherwise treat wheel as pan (two-finger trackpad or horizontal wheel)
+      // prevent page from scrolling while pointer is over the canvas
       e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const clientX = e.clientX;
-      const clientY = e.clientY;
-      const worldBefore = clientToWorld({ clientX, clientY });
-      const delta = -e.deltaY;
-      const factor = Math.exp(delta * 0.017);
-      const newScale = clamp(scale * factor, MIN_SCALE, MAX_SCALE);
-      setScale(newScale);
-      const cx = clientX - rect.left;
-      const cy = clientY - rect.top;
-      const newTranslateX = cx - worldBefore.x * newScale;
-      const newTranslateY = cy - worldBefore.y * newScale;
-      setTranslate({ x: newTranslateX, y: newTranslateY });
+  
+      // Normalize deltaMode to pixels
+      let deltaX = e.deltaX;
+      let deltaY = e.deltaY;
+      if (e.deltaMode === 1) { // DOM_DELTA_LINE
+        deltaX *= 16;
+        deltaY *= 16;
+      } else if (e.deltaMode === 2) { // DOM_DELTA_PAGE
+        const rect = el.getBoundingClientRect();
+        deltaX *= rect.height;
+        deltaY *= rect.height;
+      }
+  
+      // Apply pan: wheel down (positive deltaY) should move content up -> subtract
+      setTranslate((t) => ({ x: t.x - deltaX, y: t.y - deltaY }));
     };
+  
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel, { passive: false });
-  }, [clientToWorld, scale]);
+  }, [clientToWorld, scale]);  
+
+  useEffect(() => {
+    if (!contextMenuOpen) return;
+  
+    const onPointerDown = (e) => {
+      // if clicked inside the menu, do nothing
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      // else close
+      setContextMenuOpen(false);
+    };
+  
+    const onKey = (e) => {
+      if (e.key === "Escape") setContextMenuOpen(false);
+    };
+  
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [contextMenuOpen]);
 
   // ---------- keyboard space pan toggle ----------
   useEffect(() => {
@@ -841,6 +968,7 @@ if (connectingRef.current) {
         ref={containerRef}
         tabIndex={0}
         onPointerDown={onCanvasPointerDown}
+        onContextMenu={onContextMenu}
         style={{ width: "100%", height: "100%", position: "relative", outline: "none" }}
         className="node-canvas"
       >
@@ -1071,6 +1199,7 @@ if (connectingRef.current) {
               );              
           })}
         </div>
+       
       </div>
     </div>
   );

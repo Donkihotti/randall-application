@@ -1506,7 +1506,34 @@ async function handleGenerate(e) {
   const selectedRatio = panelValues.ratio?.selected ?? "9:16";
   const displaySrc = selectedNode?.data?.image ?? null;
 
-  // Render
+  //right click contextMenu
+  const [canvasContextMenu, setCanvasContextMenu] = useState({
+    open: false,
+    clientX: 0,
+    clientY: 0,
+    worldX: 0,
+    worldY: 0,
+  });
+
+  // close convenience
+  const closeCanvasContextMenu = () => setCanvasContextMenu(c => ({ ...c, open: false }));
+
+  const handleCanvasContextMenuRequest = (payload) => {
+    // payload: { clientX, clientY, worldX, worldY, originalEvent }
+    const pageX = payload.originalEvent?.clientX ?? payload.clientX;
+    const pageY = payload.originalEvent?.clientY ?? payload.clientY;
+  
+    setCanvasContextMenu({
+      open: true,
+      clientX: payload.clientX,
+      clientY: payload.clientY,
+      worldX: payload.worldX,
+      worldY: payload.worldY,
+      pageX,
+      pageY,
+    });
+  };
+
   return (
     <ProtectedRoute>
       <div className="page-root bg-bg grid grid-rows-12 grid-cols-12 h-screen">
@@ -1581,7 +1608,75 @@ async function handleGenerate(e) {
                 onEdgeRemove={handleEdgeRemove} 
                 onNodeRemove={handleNodeRemove}
                 panelModel={panelValues.model?.selected}
-              />
+                onContextMenuRequest={handleCanvasContextMenuRequest}
+              >
+              </NodeCanvas>
+              {canvasContextMenu.open && (
+              (() => {
+                const px = canvasContextMenu.pageX ?? 0;
+                const py = canvasContextMenu.pageY ?? 0;
+
+                // clamp so menu doesn't overflow the viewport
+                const MENU_W = 220;
+                const MENU_H = 220;
+                const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+                const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+                const left = Math.min(Math.max(8, px), vw - 8 - MENU_W);
+                const top = Math.min(Math.max(8, py), vh - 8 - MENU_H);
+
+                return (
+                  <div
+                    className="bg-main text-supersmall rounded-xs py-2 px-1"
+                    style={{
+                      position: "fixed",            // <-- use fixed so it's viewport-aligned
+                      left: left + "px",
+                      top: top + "px",
+                      zIndex: 3000,
+                      boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
+                      minWidth: 140,
+                      userSelect: "none",
+                    }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                  >
+                     <button
+                  onClick={() => {
+                    // Use your page-level helper to create a text node centered on the world coords
+                    const w = 260, h = 120;
+                    const pos = { x: Math.round(canvasContextMenu.worldX - w / 2), y: Math.round(canvasContextMenu.worldY - h / 2) };
+                    addNodeAndMarkEdited({
+                      image: null,
+                      prompt: "",
+                      model: panelValues.model?.selected,
+                      position: pos,
+                      width: w,
+                      height: h,
+                      data: { type: "text", text: "", status: "empty", model: panelValues.model?.selected },
+                    });
+                    closeCanvasContextMenu();
+                  }}
+                  style={{ display: "block", width: "100%", padding: "4px 6px", textAlign: "left", border: "none", cursor: "pointer" }}
+                  className="hover:bg-border-main hover:cursor-pointer"
+                >
+                  Text node
+                </button>
+
+                  <button
+                  onClick={() => {
+                    // create empty image node at the clicked world coordinates
+                    const ratio = panelValues.ratio?.selected ?? "9:16";
+                    // reuse your addEmptyNode helper but pass explicit position
+                    addEmptyNode({ position: { x: Math.round(canvasContextMenu.worldX - 130), y: Math.round(canvasContextMenu.worldY - 90) } });
+                    closeCanvasContextMenu();
+                  }}
+                  style={{ display: "block", width: "100%", padding: "4px 6px", textAlign: "left",  border: "none", cursor: "pointer" }}
+                  className="hover:bg-border-main hover:cursor-pointer"
+                >
+                  Image node
+                </button>
+                  </div>
+                );
+              })()
+            )}
               </div>
             </div>
           </div>
