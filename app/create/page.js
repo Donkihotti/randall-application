@@ -63,6 +63,7 @@ export default function Page() {
   const currentTargetRef = useRef(null);
   const canvasMenuRef = useRef(null);           
   const canvasWrapperRef = useRef(null); 
+  const [isCanvasMaximized, setIsCanvasMaximized] = useState(false);
 
   const looksLikeAbsoluteUrl = (s) => typeof s === "string" && /^https?:\/\//i.test(s);
   const looksLikeSignedUrl = (s) => typeof s === "string" && s.includes("/storage/v1/object/sign/");
@@ -1559,6 +1560,25 @@ async function handleGenerate(e) {
     };
   }, [canvasContextMenu.open]);
 
+  useEffect(() => {
+    // prevent body scroll while maximized
+    if (isCanvasMaximized) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = prevOverflow || "";
+      };
+    }
+    return;
+  }, [isCanvasMaximized]);
+  
+  useEffect(() => {
+    if (!isCanvasMaximized) return;
+    const onKey = (e) => { if (e.key === "Escape") setIsCanvasMaximized(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isCanvasMaximized]);
+
   return (
     <ProtectedRoute>
       <div className="page-root bg-bg grid grid-rows-12 grid-cols-12 h-screen">
@@ -1625,17 +1645,45 @@ async function handleGenerate(e) {
                   </div>
                 </div>
 
-                <NodeCanvas
-                ref={nodeCanvasRef}
-                onNodeSelect={handleNodeSelect}
-                onNodeChange={handleNodeChange}
-                onEdgeCreate={handleEdgeCreate}
-                onEdgeRemove={handleEdgeRemove} 
-                onNodeRemove={handleNodeRemove}
-                panelModel={panelValues.model?.selected}
-                onContextMenuRequest={handleCanvasContextMenuRequest}
+              <div
+                ref={canvasWrapperRef}
+                style={{
+                  position: isCanvasMaximized ? "fixed" : "relative",
+                  inset: isCanvasMaximized ? 0 : undefined,      
+                  width: isCanvasMaximized ? "100vw" : "100%",
+                  height: isCanvasMaximized ? "100vh" : "100%",
+                  zIndex: isCanvasMaximized ? 2000 : undefined,
+                  background: isCanvasMaximized ? "#101010" : undefined,
+                }}
               >
-              </NodeCanvas>
+
+                <div style={{ position: "absolute", right: 2, bottom: 2, zIndex: 60 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCanvasContextMenu((c) => ({ ...c, open: false }));
+                    setIsCanvasMaximized((s) => !s);
+                  }}
+                  aria-pressed={isCanvasMaximized}
+                  title={isCanvasMaximized ? "Exit full screen" : "Full screen"}
+                  className="button-icon"
+                >
+                  {isCanvasMaximized ? <Image src={"/Shrink.svg"} alt="Expand" width={18} height={18}/> : <Image src={"/Expand.svg"} alt="Expand" width={18} height={18}/>}
+                </button>
+              </div>
+
+                <NodeCanvas
+                  ref={nodeCanvasRef}
+                  onNodeSelect={handleNodeSelect}
+                  onNodeChange={handleNodeChange}
+                  onEdgeCreate={handleEdgeCreate}
+                  onEdgeRemove={handleEdgeRemove}
+                  onNodeRemove={handleNodeRemove}
+                  panelModel={panelValues.model?.selected}
+                  onContextMenuRequest={handleCanvasContextMenuRequest}
+                />
+              </div>
+
               {canvasContextMenu.open && (
               (() => {
                 const px = canvasContextMenu.pageX ?? 0;
@@ -1654,7 +1702,7 @@ async function handleGenerate(e) {
                     className="bg-main text-supersmall rounded-xs py-2 px-1"
                     ref={canvasMenuRef}
                     style={{
-                      position: "fixed",            // <-- use fixed so it's viewport-aligned
+                      position: "fixed",
                       left: left + "px",
                       top: top + "px",
                       zIndex: 3000,
@@ -1666,7 +1714,7 @@ async function handleGenerate(e) {
                   >
                      <button
                   onClick={() => {
-                    // Use your page-level helper to create a text node centered on the world coords
+                    // page-level helper to create a text node centered on the world coords
                     const w = 260, h = 120;
                     const pos = { x: Math.round(canvasContextMenu.worldX - w / 2), y: Math.round(canvasContextMenu.worldY - h / 2) };
                     addNodeAndMarkEdited({
@@ -1690,7 +1738,7 @@ async function handleGenerate(e) {
                   onClick={() => {
                     // create empty image node at the clicked world coordinates
                     const ratio = panelValues.ratio?.selected ?? "9:16";
-                    // reuse your addEmptyNode helper but pass explicit position
+                    // reuse addEmptyNode helper but pass explicit position
                     addEmptyNode({ position: { x: Math.round(canvasContextMenu.worldX - 130), y: Math.round(canvasContextMenu.worldY - 90) } });
                     closeCanvasContextMenu();
                   }}
