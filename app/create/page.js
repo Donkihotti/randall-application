@@ -61,6 +61,8 @@ export default function Page() {
   const nodeCanvasRef = useRef(null);
   const addedNodeIdsRef = useRef(new Set());
   const currentTargetRef = useRef(null);
+  const canvasMenuRef = useRef(null);           
+  const canvasWrapperRef = useRef(null); 
 
   const looksLikeAbsoluteUrl = (s) => typeof s === "string" && /^https?:\/\//i.test(s);
   const looksLikeSignedUrl = (s) => typeof s === "string" && s.includes("/storage/v1/object/sign/");
@@ -1534,6 +1536,29 @@ async function handleGenerate(e) {
     });
   };
 
+  useEffect(() => {
+    if (!canvasContextMenu.open) return;
+  
+    const onPointerDown = (e) => {
+      // if click is inside the menu -> ignore
+      if (canvasMenuRef.current && canvasMenuRef.current.contains(e.target)) return;
+  
+      // otherwise close the menu
+      setCanvasContextMenu((c) => ({ ...c, open: false }));
+    };
+  
+    const onKey = (e) => {
+      if (e.key === "Escape") setCanvasContextMenu((c) => ({ ...c, open: false }));
+    };
+  
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [canvasContextMenu.open]);
+
   return (
     <ProtectedRoute>
       <div className="page-root bg-bg grid grid-rows-12 grid-cols-12 h-screen">
@@ -1627,6 +1652,7 @@ async function handleGenerate(e) {
                 return (
                   <div
                     className="bg-main text-supersmall rounded-xs py-2 px-1"
+                    ref={canvasMenuRef}
                     style={{
                       position: "fixed",            // <-- use fixed so it's viewport-aligned
                       left: left + "px",

@@ -56,7 +56,7 @@ const NodeCanvas = forwardRef(function NodeCanvas(
   const AUTO_PAN_MARGIN = 80;
   const AUTO_PAN_SPEED = 12;
 
-  const [worldSize, setWorldSize] = useState({ w: 4000, h: 4000 });
+  const [worldSize, setWorldSize] = useState({ w: 10000, h: 10000 });
 
   // ---------- coordinate helpers ----------
   const clientToWorld = useCallback(({ clientX, clientY }) => {
@@ -609,7 +609,6 @@ if (connectingRef.current) {
     setConnectHoverNode(null);
     return;
   }
-  
 
       // finish drag -> snap
       if (draggingRef.current) {
@@ -1199,7 +1198,6 @@ useEffect(() => {
               );              
           })}
         </div>
-       
       </div>
     </div>
   );
