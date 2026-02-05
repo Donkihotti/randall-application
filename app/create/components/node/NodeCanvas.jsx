@@ -653,6 +653,18 @@ if (connectingRef.current) {
       return;
     }
     e.stopPropagation();
+    // If focus is inside a text editable elsewhere, blur it when clicking outside it.
+    try {
+      const active = document.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) {
+        const path = (typeof e.composedPath === "function" && e.composedPath()) || (e.path || []);
+        const clickedInsideActive = Array.isArray(path) && path.includes(active);
+        if (!clickedInsideActive) {
+          try { active.blur(); } catch (_) {}
+        }
+      }
+    } catch (err) {
+    }
     containerRef.current?.focus?.();
     try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch (_) {}
     draggingRef.current = { id: node.id, startClientX: e.clientX, startClientY: e.clientY, originX: node.x, originY: node.y };
@@ -737,9 +749,20 @@ if (connectingRef.current) {
   const onCanvasPointerDown = (e) => {
     // Always clear selections when the canvas background is clicked.
     // Node and edge elements call e.stopPropagation(), so clicks on them won't reach this handler.
-    setSelectedId(null);
-    setSelectedEdgeId(null);
-    onNodeSelect?.(null);
+    try {
+     const active = document.activeElement;
+     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) {
+       const path = (typeof e.composedPath === "function" && e.composedPath()) || (e.path || []);
+       const clickedInsideActive = Array.isArray(path) && path.includes(active);
+       if (!clickedInsideActive) {
+         try { active.blur(); } catch (_) {}
+       }
+     }
+   } catch (err) { /* ignore */ }
+
+   setSelectedId(null);
+   setSelectedEdgeId(null);
+   onNodeSelect?.(null);
   
     // Decide whether we should start panning.
     // Keep existing semantics: allow panning for left/middle click or when Space is held.
@@ -1099,7 +1122,7 @@ useEffect(() => {
                >
                  <div
               aria-hidden="true"
-              className="flex flex-row items-center justify-between gap-x-1.5 ml-1 relative w-full"
+              className="flex flex-row items-center justify-between gap-x-1.5  relative w-full"
               style={{
                 position: "absolute",
                 top: -23,

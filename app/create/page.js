@@ -1657,7 +1657,7 @@ async function handleGenerate(e) {
                 }}
               >
 
-                <div style={{ position: "absolute", right: 2, bottom: 2, zIndex: 60 }}>
+                <div style={{ position: "absolute", right: 0, bottom: 0, zIndex: 60 }}>
                 <button
                   type="button"
                   onClick={() => {
