@@ -266,27 +266,26 @@ const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null
         const clientY = rect.top + rect.height / 2;
         return clientToWorld({ clientX, clientY });
       };
-
+  
       return {
         // generic add/update node (low-level)
         addNode(args = {}) {
           return addOrUpdateNode(args);
         },
-
+  
         // add a text node — forward `data` and ensure `type: "text"`
         addTextNode({ id = null, text = "", position = null, width = 260, height = null, data = {} } = {}) {
-            // enforce 1:1: use provided width, or fallback to 260
-            const w = Math.max(80, width || 260);
-            const h = Math.round(height ?? w);
-            const mergedData = {
-              ...(data || {}),
-              type: data?.type ?? "text",
-              text: (typeof text !== "undefined" ? text : (data?.text ?? "")),
-              status: data?.status ?? (text ? "done" : "empty"),
-            };
-            return addOrUpdateNode({ id, position, width: w, height: h, data: mergedData });
-          },
-
+          const w = Math.max(80, width || 260);
+          const h = Math.round(height ?? w);
+          const mergedData = {
+            ...(data || {}),
+            type: data?.type ?? "text",
+            text: (typeof text !== "undefined" ? text : (data?.text ?? "")),
+            status: data?.status ?? (text ? "done" : "empty"),
+          };
+          return addOrUpdateNode({ id, position, width: w, height: h, data: mergedData });
+        },
+  
         // add an image node — forward `data` but do not overwrite an existing data.type
         addImageNode({
           id = null,
@@ -309,7 +308,7 @@ const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null
           };
           return addOrUpdateNode({ id, image, prompt, model, position, width, height, data: mergedData });
         },
-
+  
         // add image at client position (centers node on pointer)
         addImageNodeAtClientPos({ image = null, prompt = "", model = "", clientX, clientY, width = 260, height = 180, data = {} } = {}) {
           const world = clientToWorld({ clientX, clientY });
@@ -325,63 +324,65 @@ const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null
           };
           return addOrUpdateNode({ image, prompt, model, position: pos, width, height, data: mergedData });
         },
-
+  
         updateNode(id, patch = {}) {
-            setNodes((prev) =>
-              prev.map((n) => {
-                if (n.id !== id) return n;
-                // apply shallow merges (preserve fields not provided in patch)
-                const merged = { ...n, ...patch };
-                merged.data = { ...(n.data || {}), ...(patch.data || {}) };
-          
-                // If this node is (or becomes) a text node, enforce square size.
-                const isText = (n.data?.type === "text") || (merged.data?.type === "text");
-                if (isText) {
-                  // choose size: honor explicit patch.width or patch.height if present, otherwise keep existing
-                  const requested = (typeof patch.width === "number" ? patch.width : (typeof patch.height === "number" ? patch.height : n.width));
-                  const size = Math.round(Math.max(80, requested || n.width || n.height || 260));
-                  merged.width = size;
-                  merged.height = size;
-                } else {
-                  // non-text nodes: apply width/height if provided (preserve otherwise)
-                  if (typeof patch.width === "number") merged.width = patch.width;
-                  if (typeof patch.height === "number") merged.height = patch.height;
-                }
-          
-                return merged;
-              })
-            );
-          
-            // notify after update
-            requestAnimationFrame(() => {
-              setSelectedId(id);
-              const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
-                ? ref.current.getNodes?.()?.find((nn) => nn.id === id) ?? null
-                : nodes.find((nn) => nn.id === id) ?? null;
-              if (updated) {
-                onNodeSelect?.(updated);
-                onNodeChange?.(updated);
+          setNodes((prev) =>
+            prev.map((n) => {
+              if (n.id !== id) return n;
+              // apply shallow merges (preserve fields not provided in patch)
+              const merged = { ...n, ...patch };
+              merged.data = { ...(n.data || {}), ...(patch.data || {}) };
+  
+              // If this node is (or becomes) a text node, enforce square size.
+              const isText = (n.data?.type === "text") || (merged.data?.type === "text");
+              if (isText) {
+                // choose size: honor explicit patch.width or patch.height if present, otherwise keep existing
+                const requested = (typeof patch.width === "number" ? patch.width : (typeof patch.height === "number" ? patch.height : n.width));
+                const size = Math.round(Math.max(80, requested || n.width || n.height || 260));
+                merged.width = size;
+                merged.height = size;
+              } else {
+                // non-text nodes: apply width/height if provided (preserve otherwise)
+                if (typeof patch.width === "number") merged.width = patch.width;
+                if (typeof patch.height === "number") merged.height = patch.height;
               }
-            });
-          
-            return id;
-          },
-
-          addEdge({ id: providedEdgeId = null, sourceId, targetId, emit = true } = {}) {
-            return createOrAddEdge({ sourceId, targetId, providedEdgeId: providedEdgeId, emit });
-          },
-
-          updateEdgeId(oldId, newId) {
-            return updateEdgeId(oldId, newId);
-          }, 
-
+  
+              return merged;
+            })
+          );
+  
+          // notify after update
+          requestAnimationFrame(() => {
+            setSelectedId(id);
+            const updated = (ref && ref.current && typeof ref.current.getNodes === "function")
+              ? ref.current.getNodes?.()?.find((nn) => nn.id === id) ?? null
+              : nodes.find((nn) => nn.id === id) ?? null;
+            if (updated) {
+              onNodeSelect?.(updated);
+              onNodeChange?.(updated);
+            }
+          });
+  
+          return id;
+        },
+  
+        // add edge: create local edge and optionally emit onEdgeCreate (emit=false for server/hydration adds)
+        addEdge({ id: providedEdgeId = null, sourceId, targetId, emit = true } = {}) {
+          return createOrAddEdge({ sourceId, targetId, providedEdgeId: providedEdgeId, emit });
+        },
+  
+        // update an existing edge id in-place to avoid flicker (swap tempId -> serverId)
+        updateEdgeId(oldId, newId) {
+          return updateEdgeId(oldId, newId);
+        },
+  
         removeEdge(edgeId) {
           if (!edgeId) return null;
           setEdges((prev) => prev.filter((e) => e.id !== edgeId));
           setSelectedEdgeId((prev) => (prev === edgeId ? null : prev));
           return edgeId;
         },
-
+  
         // remove edge by endpoints (source+target)
         removeEdgeByEndpoints({ sourceId, targetId } = {}) {
           if (!sourceId || !targetId) return null;
@@ -399,11 +400,11 @@ const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null
           if (removed && selectedEdgeId === removed) setSelectedEdgeId(null);
           return removed;
         },
-
+  
         removeNode(id) {
           if (!id) return;
           const wasSelected = selectedId === id;
-
+  
           setNodes((prev) => prev.filter((n) => n.id !== id));
           setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id));
           setSelectedId((prev) => (prev === id ? null : prev));
@@ -412,36 +413,36 @@ const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null
             const stillExists = edges.some((ed) => ed.id === prev && ed.sourceId !== id && ed.targetId !== id);
             return stillExists ? prev : null;
           });
-
+  
           if (wasSelected) {
             setTimeout(() => onNodeSelect?.(null), 0);
           }
           return id;
         },
-
+  
         getNodes() {
           return nodes;
         },
-
+  
         getEdges() {
           return edges;
         },
-
+  
         getViewCenterWorld,
         centerOnNode(nodeId, { animate = false } = {}) {
           try {
             const node = nodes.find((n) => n.id === nodeId);
             if (!node || !containerRef.current) return false;
             const rect = containerRef.current.getBoundingClientRect();
-
+  
             // compute desired translate so node center maps to rect center
             const nodeCenterWorld = { x: node.x + (node.width ?? 260) / 2, y: node.y + (node.height ?? 180) / 2 };
             const centerClientX = rect.width / 2;
             const centerClientY = rect.height / 2;
-
+  
             const desiredTranslateX = centerClientX - nodeCenterWorld.x * scale;
             const desiredTranslateY = centerClientY - nodeCenterWorld.y * scale;
-
+  
             if (animate) {
               const start = { ...translate };
               const end = { x: desiredTranslateX, y: desiredTranslateY };
@@ -462,7 +463,7 @@ const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null
             return false;
           }
         },
-
+  
         clear() {
           setNodes([]);
           setEdges([]);
@@ -473,9 +474,9 @@ const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null
       };
     },
     // dependencies: keep minimal but include values used inside API
-    [addOrUpdateNode, clientToWorld, nodes, edges, onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, scale, translate]
+    [addOrUpdateNode, clientToWorld, nodes, edges, onNodeSelect, onNodeChange, onEdgeCreate, onNodeRemove, onEdgeRemove, scale, translate, createOrAddEdge, updateEdgeId]
   );
-
+  
   // ---------- port coords ----------
   function getPortWorld(node, port) {
     if (!node) return { x: 0, y: 0 };
