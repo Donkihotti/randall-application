@@ -131,11 +131,7 @@ export default function TextNode({ node, isSelected = false, onCommit, onStartCo
         <div style={{ width: 7, height: 7, borderRadius: 3.5, background: "#3b82f6" }} />
       </div>
 
-      {isHovering && data?.text && (
-        <div style={{ position: "absolute", left: 6, bottom: 6, zIndex: 60, background: "#fff", padding: 6, borderRadius: 6, boxShadow: "0 1px 6px rgba(0,0,0,0.12)" }}>
-         
-        </div>
-      )}
+    
 
       {sourcePreview && (
         <div style={{ position: "absolute", left: 6, bottom: 6, width: 45, height: 45, borderRadius: 2, overflow: "hidden", zIndex: 60, boxShadow: "0 1px 4px rgba(0,0,0,0.35)" }}>

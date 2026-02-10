@@ -97,7 +97,7 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
         )}
       </div>
 
-      {/* RIGHT (output) port — CENTERED vertically */}
+      {/* RIGHT (output) port */}
       <div
         data-port="output"
         onPointerDown={(e) => {
@@ -120,7 +120,7 @@ export default function ImageNode({ node, isSelected = false, onRemove, onStartC
       { isHovering && ( 
         <div className="w-24 flex flex-row">
              {sourcePreview && (
-        <div style={{ position: "absolute", left: 6, bottom: 6, width: 45, height: 45, borderRadius: 2, overflow: "hidden", zIndex: 60, boxShadow: "0 1px 4px rgba(0,0,0,0.35)" }}>
+        <div style={{ position: "absolute", left: 6, bottom: 6, width: 32, height: 32, borderRadius: 2, overflow: "hidden", zIndex: 60, }}>
           {sourcePreview.type === "image" ? (
             <img src={sourcePreview.src} alt="source" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
           ) : (

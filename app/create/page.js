@@ -1037,69 +1037,111 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
     }
   }, [currentProjectId]);
 
-  // --- ADD / REPLACE: apply aspect-ratio changes when the ratio panel or selection changes ---
-  // LOCK: do NOT change nodes that already have an image (except to attach missing aspect metadata)
-// --- Apply aspect ratio changes only when the user changes the ratio control ---
-// Only act when panelValues.ratio.selected actually changes (not when selection changes)
 const prevRatioRef = useRef(panelValues.ratio?.selected);
 
 useEffect(() => {
   const ratio = panelValues.ratio?.selected;
   if (!ratio) return;
 
-  // Only proceed when the ratio actually changed (skip initial mount / selection-only changes)
+  // Only proceed when the ratio actually changed (skip initial mount)
   if (prevRatioRef.current === ratio) {
     return;
   }
   prevRatioRef.current = ratio;
 
-  // If there's no selected node, nothing to update; we don't auto-resize nodes on selection.
   const targetNode = selectedNode ?? null;
   if (!targetNode?.id) return;
 
-  try {
-    const hasImage = Boolean(targetNode?.data?.image);
+  (async () => {
+    try {
+      const hasImage = Boolean(targetNode?.data?.image);
 
-    // If node already has an image, do not resize it — only attach aspect metadata if missing
-    if (hasImage) {
-      const existing = targetNode?.data ?? {};
-      if (!existing.aspect) {
-        const parts0 = ratio.split(":").map(Number);
-        if (parts0.length === 2 && !parts0.some(isNaN)) {
-          const updated = { ...targetNode, data: { ...existing, aspect: ratio } };
-          setSelectedNode(updated);
-          try { handleNodeChange?.(updated); } catch (e) { /* ignore */ }
+      // If node already has an image, we don't resize it — but we may attach aspect metadata and persist it.
+      if (hasImage) {
+        const existing = targetNode?.data ?? {};
+        if (!existing.aspect) {
+          // attach aspect locally first
+          const updatedLocal = { ...targetNode, data: { ...existing, aspect: ratio } };
+          setSelectedNode(updatedLocal);
+
+          // If node is not server-backed, try to promote so PATCH will succeed
+          let targetId = updatedLocal.id;
+          if (!isUuid(targetId) && currentProjectId) {
+            try {
+              const serverId = await promoteLocalNodeToServer(updatedLocal);
+              if (serverId) targetId = serverId;
+            } catch (err) {
+              console.warn("promoteLocalNodeToServer failed while attaching aspect (image node):", err);
+            }
+          }
+
+          // Now persist via handleNodeChange (ensure we're passing server-backed id when possible)
+          try {
+            const updatedNode = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === targetId) ?? null;
+            if (updatedNode) {
+              // Ensure aspect set in node.data
+              updatedNode.data = { ...(updatedNode.data || {}), aspect: ratio };
+              handleNodeChange?.(updatedNode);
+              setSelectedNode(updatedNode);
+            } else {
+              // Fallback: attempt direct update via imperative API
+              await nodeCanvasRef.current?.updateNode?.(targetId, { data: { ...(updatedLocal.data || {}), aspect: ratio } });
+              const after = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === targetId) ?? null;
+              if (after) { handleNodeChange?.(after); setSelectedNode(after); }
+            }
+          } catch (err) {
+            console.warn("Failed to persist aspect metadata for image node:", err);
+          }
+        }
+        return;
+      }
+
+      // Node has no image -> allowed to resize to new aspect
+      const parts = ratio.split(":").map((p) => Number(p));
+      if (parts.length !== 2 || parts.some(isNaN)) return;
+      const [wR, hR] = parts;
+      if (wR <= 0 || hR <= 0) return;
+
+      // base width (prefer existing width)
+      const baseWidth = Math.max(80, targetNode.width || 260);
+      const newWidth = Math.round(Math.max(80, baseWidth));
+      const newHeight = Math.round(Math.max(80, (baseWidth * (hR / wR))));
+
+      // Ensure this node is server-backed before persisting. If not, promote it.
+      let targetId = targetNode.id;
+      if (!isUuid(targetId) && currentProjectId) {
+        try {
+          const serverId = await promoteLocalNodeToServer(targetNode);
+          if (serverId) targetId = serverId;
+        } catch (err) {
+          console.warn("promoteLocalNodeToServer failed while resizing node for aspect change:", err);
+          // fall through — we'll still update locally but persistence may not happen now
         }
       }
-      return;
+
+      // Update the canvas node (imperative API). Provide aspect in data.
+      try {
+        await nodeCanvasRef.current?.updateNode?.(targetId, {
+          width: newWidth,
+          height: newHeight,
+          data: { ...(targetNode.data || {}), aspect: ratio },
+        });
+
+        // After update, fetch up-to-date node and persist via handleNodeChange (debounced)
+        const updated = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === targetId) ?? null;
+        if (updated) {
+          handleNodeChange?.(updated);
+          setSelectedNode(updated);
+        }
+      } catch (err) {
+        console.warn("Failed to update node size/aspect on canvas:", err);
+      }
+    } catch (err) {
+      console.warn("apply-ratio-effect failed:", err);
     }
+  })();
+}, [panelValues.ratio?.selected, handleNodeChange, selectedNode?.id, currentProjectId, promoteLocalNodeToServer]);
 
-    // Node has no image -> we are allowed to change size to reflect new aspect.
-    const parts = ratio.split(":").map((p) => Number(p));
-    if (parts.length !== 2 || parts.some(isNaN)) return;
-    const [wR, hR] = parts;
-    if (wR <= 0 || hR <= 0) return;
-
-    // base width (prefer existing width)
-    const baseWidth = Math.max(80, targetNode.width || 260);
-    const newWidth = Math.round(Math.max(80, baseWidth));
-    const newHeight = Math.round(Math.max(80, (baseWidth * (hR / wR))));
-
-    // update node size AND attach aspect to node.data so handleNodeChange can persist it
-    const newData = { ...(targetNode.data || {}), aspect: ratio };
-
-    nodeCanvasRef.current?.updateNode?.(targetNode.id, { width: newWidth, height: newHeight, data: newData });
-
-    const updated = nodeCanvasRef.current?.getNodes?.()?.find((n) => n.id === targetNode.id) ?? null;
-    if (updated) {
-      updated.data = { ...(updated.data || {}), aspect: ratio };
-      handleNodeChange?.(updated);
-      setSelectedNode(updated);
-    }
-  } catch (err) {
-    console.warn("Failed to update node size for ratio change", err);
-  }
-}, [panelValues.ratio?.selected, handleNodeChange, selectedNode?.id]); // selectedNode?.id included only to be able to read latest selection
 
 // immediate persist of panel model to the selected node (replace previous model-effects)
 useEffect(() => {
@@ -1248,7 +1290,6 @@ useEffect(() => {
     setTimeout(() => setSelectedNode(node), 0);
   }, []);
 
-// page.js — handleEdgeRemove (replace existing)
 const handleEdgeRemove = useCallback(async (edge) => {
   if (!edge) return;
   // local immediate removal (canvas)
