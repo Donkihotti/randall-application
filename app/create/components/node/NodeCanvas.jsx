@@ -126,6 +126,43 @@ const NodeCanvas = forwardRef(function NodeCanvas(
     return () => window.removeEventListener("keydown", onKeyDownEdge);
   }, [selectedEdgeId, edges, onEdgeRemove]);
 
+/**
+ * Create an edge in local canvas state.
+ * - if providedEdgeId is given, it is treated as a server id
+ * - emit === true will call onEdgeCreate callback (only for user-initiated edges)
+ */
+const createOrAddEdge = useCallback(({ sourceId, targetId, providedEdgeId = null, emit = true } = {}) => {
+    if (!sourceId || !targetId) return null;
+    const edgeId = providedEdgeId || uid("edge_");
+  
+    // functional update to avoid stale closures
+    setEdges((prev) => {
+      // avoid duplicates by endpoints
+      const exists = prev.some((e) => e.sourceId === sourceId && e.targetId === targetId);
+      if (exists) return prev;
+  
+      const created = { id: edgeId, sourceId, targetId };
+      // Only notify parent on user-initiated edges (emit true) AND when it's not a server-provided id.
+      if (emit && !providedEdgeId) {
+        try { onEdgeCreate?.(created); } catch (err) { console.warn("onEdgeCreate failed", err); }
+      }
+      return [...prev, created];
+    });
+  
+    return edgeId;
+  }, [onEdgeCreate]);
+  
+  /**
+   * Update an existing edge's id in-place.
+   * Useful to replace local temp id with server id without removing the element.
+   */
+  const updateEdgeId = useCallback((oldId, newId) => {
+    if (!oldId || !newId || oldId === newId) return null;
+    setEdges((prev) => prev.map((e) => (e.id === oldId ? { ...e, id: newId } : e)));
+    setSelectedEdgeId((prev) => (prev === oldId ? newId : prev));
+    return newId;
+  }, []);  
+
   // ---------- small helper: add or update node in a single place ----------
   const addOrUpdateNode = useCallback(async ({
     id = null,
@@ -330,28 +367,13 @@ const NodeCanvas = forwardRef(function NodeCanvas(
             return id;
           },
 
-        addEdge({ id: providedEdgeId = null, sourceId, targetId } = {}) {
-          if (!sourceId || !targetId) return null;
-          // ensure nodes exist
-          const srcExists = nodes.some((n) => n.id === sourceId);
-          const tgtExists = nodes.some((n) => n.id === targetId);
-          if (!srcExists || !tgtExists) {
-            console.warn("addEdge: source or target does not exist", { sourceId, targetId });
-            return null;
-          }
-          // avoid duplicates
-          const exists = edges.some((e) => e.sourceId === sourceId && e.targetId === targetId);
-          if (exists) return null;
+          addEdge({ id: providedEdgeId = null, sourceId, targetId, emit = true } = {}) {
+            return createOrAddEdge({ sourceId, targetId, providedEdgeId: providedEdgeId, emit });
+          },
 
-          const edgeId = providedEdgeId || uid("edge_");
-          setEdges((prev) => {
-            const created = { id: edgeId, sourceId, targetId };
-            // notify parent (server create will be handled by outer code)
-            onEdgeCreate?.(created);
-            return [...prev, created];
-          });
-          return edgeId;
-        },
+          updateEdgeId(oldId, newId) {
+            return updateEdgeId(oldId, newId);
+          }, 
 
         removeEdge(edgeId) {
           if (!edgeId) return null;
@@ -594,14 +616,8 @@ if (connectingRef.current) {
   
     const sourceId = connectingRef.current.sourceId;
     if (hitNode && hitNode.id !== sourceId) {
-      const newEdge = { id: uid("edge_"), sourceId, targetId: hitNode.id };
-      setEdges((prev) => {
-        const exists = prev.some(ed => ed.sourceId === sourceId && ed.targetId === hitNode.id);
-        if (exists) return prev;
-        // notify parent
-        onEdgeCreate?.(newEdge);
-        return [...prev, newEdge];
-      });
+        const tempId = createOrAddEdge({ sourceId, targetId: hitNode.id, providedEdgeId: null, emit: true });
+        console.debug("NodeCanvas: local edge created", { tempId, sourceId, targetId: hitNode.id });
     }
   
     connectingRef.current = null;

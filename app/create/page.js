@@ -946,75 +946,81 @@ function getCanvasCenterTopLeft(width = 260, height = 180) {
   }, [currentProjectId]);
 
   // ---- Edge create ----
-  // page.js — handleEdgeCreate (replace existing)
-const handleEdgeCreate = useCallback(async (edge) => {
-  if (!currentProjectId || !edge) return;
-  const { sourceId, targetId } = edge;
-  if (!sourceId || !targetId) return;
-  if (!isUuid(sourceId) || !isUuid(targetId)) {
-    // wait until both endpoints have server UUIDs
-    console.debug("Skipping server edge create until both node IDs are server UUIDs", edge);
-    return;
-  }
-
-  const key = edgeKey(sourceId, targetId);
-  if (createdEdgesRef.current.has(key)) return;
-  if (creatingEdgesRef.current.has(key)) return;
-
-  try {
-    const existingEdges = new Set((nodeCanvasRef.current?.getEdges?.() || []).map(e => `${e.sourceId}__${e.targetId}`));
-    if (existingEdges.has(key)) {
-      createdEdgesRef.current.add(key);
+  const handleEdgeCreate = useCallback(async (edge) => {
+    if (!edge) return;
+    const { id: localId = null, sourceId, targetId } = edge;
+  
+    if (!sourceId || !targetId) {
+      console.warn("handleEdgeCreate: missing endpoints", edge);
       return;
     }
-  } catch (err) {}
-
-  creatingEdgesRef.current.add(key);
-  try {
-    // POST to create edge server-side
-    const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceNode: sourceId, targetNode: targetId }),
-    });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      console.warn("Failed to persist edge", res.status, txt);
+  
+    // dedupe key
+    const key = edgeKey(sourceId, targetId);
+    if (createdEdgesRef.current.has(key)) {
+      // already created on server
       return;
     }
-
-    const payload = await res.json().catch(() => ({}));
-    const serverEdge = payload?.edge ?? null;
-
-    // Now we must reconcile client canvas edge(s) with serverEdge
-    // The canvas may have a local temporary edge id (edge.id) — replace it with serverEdge.id
+    if (creatingEdgesRef.current.has(key)) {
+      // already in flight
+      return;
+    }
+  
+    // mark creating
+    creatingEdgesRef.current.add(key);
+  
     try {
-      const canvasEdges = nodeCanvasRef.current?.getEdges?.() || [];
-      // find a matching local edge by endpoints
-      const local = canvasEdges.find(e => e.sourceId === sourceId && e.targetId === targetId);
-      if (local) {
-        // remove the local edge (id like edge_...)
-        nodeCanvasRef.current?.removeEdge?.(local.id);
+      console.debug("handleEdgeCreate: creating server edge", { sourceId, targetId, localId });
+  
+      const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectId)}/edges`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceNode: sourceId, targetNode: targetId }),
+      });
+  
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        console.warn("Failed to persist edge", res.status, txt);
+        return;
       }
-      // add server-side edge id into canvas (use provided id so future deletes use the UUID)
-      if (serverEdge && serverEdge.id) {
-        nodeCanvasRef.current?.addEdge?.({ id: serverEdge.id, sourceId, targetId });
-      } else {
-        // fallback: add edge with the server-provided object or generated id if missing
-        nodeCanvasRef.current?.addEdge?.({ sourceId, targetId });
+  
+      const payload = await res.json().catch(() => ({}));
+      const serverEdge = payload?.edge ?? payload;
+  
+      // Now reconcile canvas state:
+      try {
+        const canvasEdges = nodeCanvasRef.current?.getEdges?.() || [];
+        const local = canvasEdges.find(e => e.sourceId === sourceId && e.targetId === targetId);
+  
+        if (local) {
+          // If server returned an id, update local id in-place.
+          if (serverEdge?.id) {
+            // Prefer updateEdgeId if available
+            if (typeof nodeCanvasRef.current?.updateEdgeId === "function") {
+              nodeCanvasRef.current.updateEdgeId(local.id, serverEdge.id);
+            } else {
+              // fallback: remove local then add server id but ensure emit:false
+              nodeCanvasRef.current.removeEdge?.(local.id);
+              nodeCanvasRef.current.addEdge?.({ id: serverEdge.id, sourceId, targetId, emit: false });
+            }
+          }
+        } else {
+          // no local edge found -> add server edge silently
+          nodeCanvasRef.current.addEdge?.({ id: serverEdge?.id ?? undefined, sourceId, targetId, emit: false });
+        }
+  
+        createdEdgesRef.current.add(key);
+        console.debug("handleEdgeCreate: reconciled server edge", { serverEdge, key });
+      } catch (err) {
+        console.warn("handleEdgeCreate: reconciliation failed", err);
       }
     } catch (err) {
-      console.warn("Failed to reconcile canvas edge with server edge", err);
+      console.warn("handleEdgeCreate: failed to create server edge", err);
+    } finally {
+      creatingEdgesRef.current.delete(key);
     }
-
-    createdEdgesRef.current.add(key);
-  } catch (err) {
-    console.warn("Failed to persist edge", err);
-  } finally {
-    creatingEdgesRef.current.delete(key);
-  }
-}, [currentProjectId]);
-
+  }, [currentProjectId]);
+  
   // server-side delete
   const handleNodeRemove = useCallback(async (nodeId) => {
     if (!currentProjectId || !nodeId) return;
